@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.python-version
+
+# Env
+.venv/
+venv/
+env/
+ENV/
+
+# Tools / caches
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.*
+.cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build/output
+build/
+dist/
+*.log
+
+# Vercel local project link (opcjonalnie pominąć z repo)
+.vercel/
+
+# Node (na wszelki wypadek, choć nieużywane)
+node_modules/
