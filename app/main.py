@@ -266,7 +266,7 @@ def _sheet_append_row_dynamic(title: str, default_headers: List[str], record: Di
     # Diagnostyka przyczyn braku klienta / FILE_ID
     if client is None:
         info = _get_service_account_info()
-        print(f"[Sheets] Client missing; SERVICE_ACCOUNT={'OK' if info else 'MISSING'} (***REMOVED***
+        print(f"[Sheets] Client missing; SERVICE_ACCOUNT={'OK' if info else 'MISSING'} (***REMOVED***")
     if not file_id:
         print("[Sheets] FILE_ID missing or empty")
 
