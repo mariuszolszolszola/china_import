@@ -36,6 +36,17 @@
           <input type="number" step="0.01" id="cExchangeRate" placeholder="4.15" value="4.0">
         </div>
       </div>
+      <h3>Wczytaj z arkusza</h3>
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="sheetContainerSelect">Kontener z arkusza</label>
+          <select id="sheetContainerSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="loadContainerFromSheetBtn" class="btn">Załaduj</button>
+        </div>
+      </div>
 
       <h3>Daty</h3>
       <div class="grid grid-4">
@@ -149,6 +160,17 @@
           <input type="checkbox" id="cDocumentsInSystem">
           Dokumenty w systemie
         </label>
+      <h3>Wczytaj z arkusza</h3>
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="sheetProductSelect">Produkt z arkusza</label>
+          <select id="sheetProductSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="loadProductFromSheetBtn" class="btn">Załaduj</button>
+        </div>
+      </div>
       </div>
 
       <div class="form-actions">
@@ -199,6 +221,14 @@
         </div>
       </div>
 
+      <h3>Załączniki</h3>
+      <div class="form-group">
+        <label for="pFiles">Pliki (opcjonalnie)</label>
+        <input type="file" id="pFiles" multiple>
+        <small>Pliki zostaną zapisane w folderze o nazwie produktu przy zapisie.</small>
+        <div id="pFilesPreview" class="files-preview"></div>
+      </div>
+
       <div class="form-actions">
         <button id="saveProductBtn" class="btn success">Zapisz Produkt</button>
         <button id="cancelProductBtn" class="btn">Anuluj</button>
@@ -215,6 +245,28 @@
       </div>
       <div id="containerList" class="container-list">
         <!-- renderowane dynamicznie -->
+      </div>
+    </section>
+
+    <section class="card" id="legendSection">
+      <h3>Legenda kolorów</h3>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--green-bg); border-left: 6px solid var(--green-border);"></div>
+          <span>Dokumenty w księgowości</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: linear-gradient(90deg, var(--green-yellow-start), var(--green-yellow-end)); border-left: 6px solid var(--green-border);"></div>
+          <span>Dostarczono do magazynu</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--purple-bg); border-left: 6px solid var(--purple-border);"></div>
+          <span>Odprawa celna opłacona</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--gray-bg); border-left: 6px solid var(--gray-border);"></div>
+          <span>Odebrano w Chinach</span>
+        </div>
       </div>
     </section>
   </div>

@@ -11,6 +11,9 @@ const state = {
   editingProductId: null,
   selectedContainerId: null,
   expanded: {}, // { [containerId]: boolean }
+  sheetContainers: [],
+  sheetProducts: [],
+  productOriginalFiles: [],
 };
 
 /* Elementy DOM */
@@ -22,6 +25,12 @@ const els = {
   containerFormTitle: document.getElementById("containerFormTitle"),
   saveContainerBtn: document.getElementById("saveContainerBtn"),
   cancelContainerBtn: document.getElementById("cancelContainerBtn"),
+
+  // Arkusz (kontener/produkt)
+  sheetContainerSelect: document.getElementById("sheetContainerSelect"),
+  loadContainerFromSheetBtn: document.getElementById("loadContainerFromSheetBtn"),
+  sheetProductSelect: document.getElementById("sheetProductSelect"),
+  loadProductFromSheetBtn: document.getElementById("loadProductFromSheetBtn"),
 
   // Pola kontenera
   cName: document.getElementById("cName"),
@@ -63,6 +72,8 @@ const els = {
   pCustomsDutyPercent: document.getElementById("pCustomsDutyPercent"),
   saveProductBtn: document.getElementById("saveProductBtn"),
   cancelProductBtn: document.getElementById("cancelProductBtn"),
+  pFiles: document.getElementById("pFiles"),
+  pFilesPreview: document.getElementById("pFilesPreview"),
 
   // Lista
   refreshBtn: document.getElementById("refreshBtn"),
@@ -120,6 +131,55 @@ function convertPrice(priceUSD, exchangeRate) {
     return (priceUSD * er).toFixed(2) + " zł";
   }
   return priceUSD.toFixed(2) + " $";
+}
+
+function fillSheetContainerSelect() {
+  const sel = els.sheetContainerSelect;
+  if (!sel) return;
+  sel.innerHTML = "";
+  const optEmpty = document.createElement("option");
+  optEmpty.value = "";
+  optEmpty.textContent = "— wybierz —";
+  sel.appendChild(optEmpty);
+  state.sheetContainers.forEach((rec, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = rec.name ? rec.name : `Kontener ${idx + 1}`;
+    sel.appendChild(opt);
+  });
+}
+
+function fillSheetProductSelect() {
+  const sel = els.sheetProductSelect;
+  if (!sel) return;
+  sel.innerHTML = "";
+  const optEmpty = document.createElement("option");
+  optEmpty.value = "";
+  optEmpty.textContent = "— wybierz —";
+  sel.appendChild(optEmpty);
+  state.sheetProducts.forEach((rec, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = rec.name ? rec.name : `Produkt ${idx + 1}`;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadSheets() {
+  try {
+    const cs = await api("GET", "/api/sheets/containers");
+    state.sheetContainers = Array.isArray(cs) ? cs : [];
+  } catch (_) {
+    state.sheetContainers = [];
+  }
+  try {
+    const ps = await api("GET", "/api/sheets/products");
+    state.sheetProducts = Array.isArray(ps) ? ps : [];
+  } catch (_) {
+    state.sheetProducts = [];
+  }
+  fillSheetContainerSelect();
+  fillSheetProductSelect();
 }
 
 function calculateProductCosts(product, container) {
@@ -333,6 +393,18 @@ function renderContainersList() {
 
           const row = document.createElement("div");
           row.className = "product-row";
+          const attachmentsHtml = (() => {
+            const files = Array.isArray(p.files) ? p.files : [];
+            if (!files.length) {
+              return '<div class="product-files"><div class="files empty">Brak załączników</div></div>';
+            }
+            const links = files.map((u) => {
+              const name = fileNameFromUrl(u);
+              const safeUrl = typeof u === "string" ? u : "";
+              return `<a href="${safeUrl}" target="_blank" download>${name}</a>`;
+            }).join(", ");
+            return `<div class="product-files"><div class="files">Załączniki: ${links}</div></div>`;
+          })();
           row.innerHTML = `
             <div class="product-main">
               <div class="product-name"><strong>${p.name}</strong> (ilość: ${Math.max(1, num(p.quantity, 1))})</div>
@@ -346,6 +418,7 @@ function renderContainersList() {
               <div>Dodatkowe/szt.: <strong>${convertPrice(costs.additionalPerUnit, exchangeRate)}</strong></div>
               <div>Razem/szt.: <strong>${convertPrice(costs.totalCostPerUnit, exchangeRate)}</strong></div>
             </div>
+            ${attachmentsHtml}
             <div class="product-actions">
               <button class="btn" data-action="edit-product" data-cid="${c.id}" data-pid="${p.id}">Edytuj</button>
               <button class="btn danger" data-action="delete-product" data-cid="${c.id}" data-pid="${p.id}">Usuń</button>
@@ -477,6 +550,9 @@ function populateProductForm(cId, p) {
   els.pTotalPriceCurrency.textContent = p.totalPriceCurrency || "USD";
   els.pProductCbm.value = p.productCbm || "";
   els.pCustomsDutyPercent.value = p.customsDutyPercent || "";
+  state.productOriginalFiles = Array.isArray(p.files) ? p.files.slice() : [];
+  if (els.pFiles) els.pFiles.value = "";
+  if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
 }
 
 function resetProductForm() {
@@ -488,6 +564,9 @@ function resetProductForm() {
   els.pTotalPriceCurrency.textContent = "USD";
   els.pProductCbm.value = "";
   els.pCustomsDutyPercent.value = "";
+  state.productOriginalFiles = [];
+  if (els.pFiles) els.pFiles.value = "";
+  if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
 }
 
 /* Zdarzenia globalne */
@@ -504,6 +583,7 @@ els.toggleContainerFormBtn.addEventListener("click", () => {
   state.showContainerForm = !state.showContainerForm;
   if (state.showContainerForm) {
     els.containerFormSection.classList.remove("hidden");
+    fillSheetContainerSelect();
   } else {
     els.containerFormSection.classList.add("hidden");
     state.editingContainerId = null;
@@ -557,12 +637,103 @@ function toggleCurrencyButton(btn) {
   btn.addEventListener("click", () => toggleCurrencyButton(btn));
 });
 
+/* Załączniki produktu – podgląd wybranych plików i upload */
+function fileNameFromUrl(url) {
+  try {
+    const u = new URL(url, window.location.origin);
+    const path = u.pathname || url;
+    const parts = path.split("/");
+    return parts.pop() || url;
+  } catch (_) {
+    const parts = String(url).split("/");
+    return parts.pop() || String(url);
+  }
+}
+
+function renderSelectedFilesPreview() {
+  const box = els.pFilesPreview;
+  if (!box) return;
+  const files = els.pFiles && els.pFiles.files ? Array.from(els.pFiles.files) : [];
+  if (!files.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = files.map((f) => `<div class="file-chip">${f.name}</div>`).join("");
+}
+
+async function uploadProductFiles(productName, files) {
+  const urls = [];
+  for (const f of files) {
+    const form = new FormData();
+    form.append("productName", productName || "product");
+    form.append("file", f);
+    try {
+      const res = await fetch("/api/files/upload", { method: "POST", body: form });
+      if (!res.ok) throw new Error("Upload failed");
+      const json = await res.json();
+      if (json && json.url) urls.push(json.url);
+    } catch (e) {
+      alert("Błąd uploadu pliku: " + (e?.message || e));
+    }
+  }
+  return urls;
+}
+
+if (els.pFiles) {
+  els.pFiles.addEventListener("change", renderSelectedFilesPreview);
+}
+
+if (els.loadContainerFromSheetBtn) {
+  els.loadContainerFromSheetBtn.addEventListener("click", () => {
+    const sel = els.sheetContainerSelect;
+    if (!sel) return;
+    const idx = parseInt(sel.value || "", 10);
+    if (!Number.isFinite(idx)) {
+      alert("Wybierz rekord kontenera z arkusza.");
+      return;
+    }
+    const rec = state.sheetContainers[idx];
+    if (!rec) {
+      alert("Rekord nie istnieje.");
+      return;
+    }
+    state.showContainerForm = true;
+    els.containerFormSection.classList.remove("hidden");
+    state.editingContainerId = null;
+    els.containerFormTitle.textContent = "Nowy Kontener (z arkusza)";
+    els.cName.value = rec.name || "";
+    els.cExchangeRate.value = rec.exchangeRate || "4.0";
+    els.cOrderDate.value = rec.orderDate || "";
+    els.cPaymentDate.value = rec.paymentDate || "";
+    els.cProductionDays.value = rec.productionDays || "";
+    els.cDeliveryDate.value = rec.deliveryDate || "";
+    els.cContainerCost.value = rec.containerCost || "";
+    els.cContainerCostCurrency.textContent = rec.containerCostCurrency || "USD";
+    els.cCustomsClearanceCost.value = rec.customsClearanceCost || "";
+    els.cCustomsClearanceCostCurrency.textContent = rec.customsClearanceCostCurrency || "USD";
+    els.cTransportChinaCost.value = rec.transportChinaCost || "";
+    els.cTransportChinaCostCurrency.textContent = rec.transportChinaCostCurrency || "USD";
+    els.cTransportPolandCost.value = rec.transportPolandCost || "";
+    els.cTransportPolandCostCurrency.textContent = rec.transportPolandCostCurrency || "USD";
+    els.cInsuranceCost.value = rec.insuranceCost || "";
+    els.cInsuranceCostCurrency.textContent = rec.insuranceCostCurrency || "USD";
+    els.cTotalTransportCbm.value = rec.totalTransportCbm || "";
+    els.cAdditionalCosts.value = rec.additionalCosts || "";
+    els.cAdditionalCostsCurrency.textContent = rec.additionalCostsCurrency || "USD";
+    els.cPickedUpInChina.checked = !!rec.pickedUpInChina;
+    els.cCustomsClearanceDone.checked = !!rec.customsClearanceDone;
+    els.cDeliveredToWarehouse.checked = !!rec.deliveredToWarehouse;
+    els.cDocumentsInSystem.checked = !!rec.documentsInSystem;
+  });
+}
+
 /* Produkt – pokaz/ukryj formularz */
 els.toggleProductFormBtn.addEventListener("click", () => {
   state.showProductForm = !state.showProductForm;
   if (state.showProductForm) {
     els.productFormSection.classList.remove("hidden");
     renderProductContainerSelect();
+    fillSheetProductSelect();
   } else {
     els.productFormSection.classList.add("hidden");
     state.editingProductId = null;
@@ -585,6 +756,14 @@ els.saveProductBtn.addEventListener("click", async () => {
     return;
   }
   try {
+    const filesInput = els.pFiles;
+    const filesToUpload = filesInput && filesInput.files ? Array.from(filesInput.files) : [];
+    let uploadedUrls = [];
+    if (filesToUpload.length > 0) {
+      uploadedUrls = await uploadProductFiles(data.name, filesToUpload);
+    }
+    data.files = [...(state.productOriginalFiles || []), ...uploadedUrls];
+
     if (state.editingProductId) {
       await api("PUT", `/api/containers/${containerId}/products/${state.editingProductId}`, data);
     } else {
@@ -595,6 +774,9 @@ els.saveProductBtn.addEventListener("click", async () => {
     state.showProductForm = false;
     els.productFormSection.classList.add("hidden");
     resetProductForm();
+    if (els.pFiles) els.pFiles.value = "";
+    if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
+    state.productOriginalFiles = [];
   } catch (e) {
     alert("Błąd zapisu produktu: " + e.message);
   }
@@ -606,6 +788,33 @@ els.cancelProductBtn.addEventListener("click", () => {
   els.productFormSection.classList.add("hidden");
   resetProductForm();
 });
+
+if (els.loadProductFromSheetBtn) {
+  els.loadProductFromSheetBtn.addEventListener("click", () => {
+    const sel = els.sheetProductSelect;
+    if (!sel) return;
+    const idx = parseInt(sel.value || "", 10);
+    if (!Number.isFinite(idx)) {
+      alert("Wybierz rekord produktu z arkusza.");
+      return;
+    }
+    const rec = state.sheetProducts[idx];
+    if (!rec) {
+      alert("Rekord nie istnieje.");
+      return;
+    }
+    state.showProductForm = true;
+    els.productFormSection.classList.remove("hidden");
+    state.editingProductId = null;
+    els.productFormTitle.textContent = "Nowy Produkt (z arkusza)";
+    els.pName.value = rec.name || "";
+    els.pQuantity.value = rec.quantity || "";
+    els.pTotalPrice.value = rec.totalPrice || "";
+    els.pTotalPriceCurrency.textContent = rec.totalPriceCurrency || "USD";
+    els.pProductCbm.value = rec.productCbm || "";
+    els.pCustomsDutyPercent.value = rec.customsDutyPercent || "";
+  });
+}
 
 els.refreshBtn.addEventListener("click", () => {
   loadContainers();
@@ -689,5 +898,6 @@ els.containerList.addEventListener("change", async (ev) => {
 
 /* Inicjalizacja */
 window.addEventListener("DOMContentLoaded", () => {
+  loadSheets();
   loadContainers();
 });

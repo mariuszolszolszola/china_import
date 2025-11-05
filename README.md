@@ -1,5 +1,8 @@
 # Import Tracker – FastAPI + HTML (Vercel-ready)
 
+py -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+
 Aplikacja do śledzenia kontenerów i produktów z przeliczeniami kosztów (PLN/USD) przeniesiona z React/TSX na FastAPI + czyste HTML/CSS/JS, przygotowana do hostingu na Vercel.
 
 ## Architektura
