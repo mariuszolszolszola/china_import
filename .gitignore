@@ -35,4 +35,4 @@ dist/
 .vercel/
 
 # Node (na wszelki wypadek, choć nieużywane)
-node_modules/
+node_modules/.env
