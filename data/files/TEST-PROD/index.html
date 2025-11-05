@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zarządzanie Importem z Chin</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header card">
+      <div class="header-left">
+        <h1 class="title">Zarządzanie Importem z Chin</h1>
+        <p class="subtitle">System śledzenia kontenerów i produktów</p>
+      </div>
+      <div class="header-right">
+        <div class="btn-group">
+          <button id="currencyPLNBtn" class="btn">PLN</button>
+          <button id="currencyUSDBtn" class="btn">USD</button>
+        </div>
+        <button id="toggleContainerFormBtn" class="btn primary">Dodaj Kontener</button>
+      </div>
+    </header>
+
+    <section id="containerFormSection" class="card hidden">
+      <h2 id="containerFormTitle">Nowy Kontener</h2>
+
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="cName">Nazwa Kontenera *</label>
+          <input type="text" id="cName" placeholder="np. Kontener 2024-11">
+        </div>
+        <div class="form-group">
+          <label for="cExchangeRate">Kurs USD *</label>
+          <input type="number" step="0.01" id="cExchangeRate" placeholder="4.15" value="4.0">
+        </div>
+      </div>
+      <h3>Wczytaj z arkusza</h3>
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="sheetContainerSelect">Kontener z arkusza</label>
+          <select id="sheetContainerSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="loadContainerFromSheetBtn" class="btn">Załaduj</button>
+        </div>
+      </div>
+
+      <h3>Daty</h3>
+      <div class="grid grid-4">
+        <div class="form-group">
+          <label for="cOrderDate">Data Zamówienia *</label>
+          <input type="date" id="cOrderDate">
+        </div>
+        <div class="form-group">
+          <label for="cPaymentDate">Data Opłacenia</label>
+          <input type="date" id="cPaymentDate">
+        </div>
+        <div class="form-group">
+          <label for="cProductionDays">Czas Produkcji (dni) *</label>
+          <input type="number" id="cProductionDays" placeholder="30">
+        </div>
+        <div class="form-group">
+          <label for="cDeliveryDate">Data Dostawy</label>
+          <input type="date" id="cDeliveryDate">
+        </div>
+      </div>
+
+      <h3>Transport i koszty</h3>
+      <div class="grid grid-2">
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cContainerCost">Koszt kontenera</label>
+            <input type="number" step="0.01" id="cContainerCost" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cContainerCostCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cCustomsClearanceCost">Koszt odprawy</label>
+            <input type="number" step="0.01" id="cCustomsClearanceCost" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cCustomsClearanceCostCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cTransportChinaCost">Transport Chiny → EU</label>
+            <input type="number" step="0.01" id="cTransportChinaCost" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cTransportChinaCostCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cTransportPolandCost">Transport w Polsce</label>
+            <input type="number" step="0.01" id="cTransportPolandCost" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cTransportPolandCostCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cInsuranceCost">Ubezpieczenie</label>
+            <input type="number" step="0.01" id="cInsuranceCost" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cInsuranceCostCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="cTotalTransportCbm">Łączne CBM transportu</label>
+          <input type="number" step="0.001" id="cTotalTransportCbm" placeholder="1">
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="cAdditionalCosts">Dodatkowe koszty</label>
+            <input type="number" step="0.01" id="cAdditionalCosts" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="cAdditionalCostsCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+      </div>
+
+      <h3>Statusy</h3>
+      <div class="grid grid-4">
+        <label class="checkbox">
+          <input type="checkbox" id="cPickedUpInChina">
+          Odebrany w Chinach
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="cCustomsClearanceDone">
+          Odprawa celna
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="cDeliveredToWarehouse">
+          Dostarczony do magazynu
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="cDocumentsInSystem">
+          Dokumenty w systemie
+        </label>
+      <h3>Wczytaj z arkusza</h3>
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="sheetProductSelect">Produkt z arkusza</label>
+          <select id="sheetProductSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="loadProductFromSheetBtn" class="btn">Załaduj</button>
+        </div>
+      </div>
+      </div>
+
+      <div class="form-actions">
+        <button id="saveContainerBtn" class="btn success">Zapisz Kontener</button>
+        <button id="cancelContainerBtn" class="btn">Anuluj</button>
+      </div>
+    </section>
+
+    <section id="productFormSection" class="card hidden">
+      <h2 id="productFormTitle">Nowy Produkt</h2>
+
+      <div class="grid grid-3">
+        <div class="form-group">
+          <label for="productContainerSelect">Kontener *</label>
+          <select id="productContainerSelect"></select>
+        </div>
+        <div class="form-group col-span-2">
+          <label for="pName">Nazwa produktu *</label>
+          <input type="text" id="pName" placeholder="np. Produkt A">
+        </div>
+      </div>
+
+      <div class="grid grid-3">
+        <div class="form-group">
+          <label for="pQuantity">Ilość *</label>
+          <input type="number" id="pQuantity" placeholder="1">
+        </div>
+
+        <div class="form-group currency-row">
+          <div class="flex-1">
+            <label for="pTotalPrice">Cena całkowita *</label>
+            <input type="number" step="0.01" id="pTotalPrice" placeholder="0">
+          </div>
+          <div class="currency-toggle">
+            <label>Waluta</label>
+            <button id="pTotalPriceCurrency" class="btn small">USD</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="pProductCbm">CBM produktu</label>
+          <input type="number" step="0.001" id="pProductCbm" placeholder="0">
+        </div>
+
+        <div class="form-group">
+          <label for="pCustomsDutyPercent">% cła</label>
+          <input type="number" step="0.01" id="pCustomsDutyPercent" placeholder="0">
+        </div>
+      </div>
+
+      <h3>Załączniki</h3>
+      <div class="form-group">
+        <label for="pFiles">Pliki (opcjonalnie)</label>
+        <input type="file" id="pFiles" multiple>
+        <small>Pliki zostaną zapisane w folderze o nazwie produktu przy zapisie.</small>
+        <div id="pFilesPreview" class="files-preview"></div>
+      </div>
+
+      <div class="form-actions">
+        <button id="saveProductBtn" class="btn success">Zapisz Produkt</button>
+        <button id="cancelProductBtn" class="btn">Anuluj</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="list-header">
+        <h2>Kontenery</h2>
+        <div class="btn-group">
+          <button id="toggleProductFormBtn" class="btn">Dodaj Produkt</button>
+          <button id="refreshBtn" class="btn">Odśwież</button>
+        </div>
+      </div>
+      <div id="containerList" class="container-list">
+        <!-- renderowane dynamicznie -->
+      </div>
+    </section>
+
+    <section class="card" id="legendSection">
+      <h3>Legenda kolorów</h3>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--green-bg); border-left: 6px solid var(--green-border);"></div>
+          <span>Dokumenty w księgowości</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: linear-gradient(90deg, var(--green-yellow-start), var(--green-yellow-end)); border-left: 6px solid var(--green-border);"></div>
+          <span>Dostarczono do magazynu</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--purple-bg); border-left: 6px solid var(--purple-border);"></div>
+          <span>Odprawa celna opłacona</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:18px; height:18px; border-radius:4px; background: var(--gray-bg); border-left: 6px solid var(--gray-border);"></div>
+          <span>Odebrano w Chinach</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script defer src="/static/script.js"></script>
+</body>
+</html>
