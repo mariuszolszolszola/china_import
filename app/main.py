@@ -428,12 +428,11 @@ app.mount("/files", StaticFiles(directory=str(FILES_DIR), html=False), name="fil
 @app.post("/api/files/upload")
 async def upload_product_file(productName: str = Form(...), file: UploadFile = File(...)):
     """
-    Uploaduje plik do Google Drive (jeśli skonfigurowany), z bezpiecznym fallbackiem do lokalnego storage:
-    - tworzy/znajduje podfolder o nazwie produktu pod DRIVE_ROOT_FOLDER_ID
-    - przesyła plik do tego folderu
-    - opcjonalnie ustawia publiczne uprawnienia (DRIVE_PUBLIC=1)
-    - jeśli integracja Drive jest niedostępna lub wystąpi błąd, zapisuje plik lokalnie do /files
-    - zwraca URL do pobrania
+    Upload WYŁĄCZNIE do Google Drive przez OAuth użytkownika (My Drive).
+    Wymagane .env: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN.
+    Folder docelowy: FOLDER_ID; jeśli puste lub 'root' – użyty zostanie folder wynikający z FILE_ID:
+      - jeśli FILE_ID to folder → on będzie rootem,
+      - jeśli FILE_ID to arkusz → użyty zostanie jego folder nadrzędny.
     """
     import re
     import io
@@ -443,99 +442,128 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
         s = s.strip().replace(" ", "_")
         return s[:100] or "file"
 
+    # Konfiguracja
     _load_env_from_file()
+    env_root_id = os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
+    file_id_sheet = os.environ.get("FILE_ID")
+
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
+    token_uri = os.environ.get("OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token")
+    if not client_id or not client_secret or not refresh_token:
+        raise HTTPException(status_code=500, detail="Brak konfiguracji OAuth (wymagane: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN)")
+
+    # Dane pliku
     folder_name = sanitize(productName or "product")
     filename = sanitize(getattr(file, "filename", "file"))
-
+    content_type = file.content_type or "application/octet-stream"
     content = await file.read()
     await file.close()
 
-    # Najpierw próba Google Drive
     try:
-        root_id = os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
-        info = _get_service_account_info()
-        if root_id and info:
-            from google.oauth2.service_account import Credentials  # type: ignore
-            from googleapiclient.discovery import build  # type: ignore
-            from googleapiclient.http import MediaIoBaseUpload  # type: ignore
+        # OAuth Credentials użytkownika
+        from google.oauth2.credentials import Credentials  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
+        from googleapiclient.discovery import build  # type: ignore
+        from googleapiclient.http import MediaIoBaseUpload  # type: ignore
+        from googleapiclient.errors import HttpError  # type: ignore
 
-            creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
-            # Wyłącz cache_discovery by unikać zapisu plików cache w środowiskach read-only
-            service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=DRIVE_SCOPES,
+        )
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"OAuth refresh failed: {e}")
 
-            # Znajdź lub utwórz podfolder
-            q = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{root_id}' in parents and trashed=false"
-            flags_list = {}
-            flags_create = {}
-            if DRIVE_SUPPORTS_ALL == "1":
-                flags_list = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
-                flags_create = {"supportsAllDrives": True}
-            resp = service.files().list(q=q, fields="files(id,name)", pageSize=1, **flags_list).execute()
-            files_list = resp.get("files", [])
-            if files_list:
-                subfolder_id = files_list[0]["id"]
-            else:
-                meta = {
-                    "name": folder_name,
-                    "mimeType": "application/vnd.google-apps.folder",
-                    "parents": [root_id],
-                }
-                created_folder = service.files().create(body=meta, fields="id,name,parents", **flags_create).execute()
-                subfolder_id = created_folder["id"]
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-            # Upload pliku do Drive
-            media = MediaIoBaseUpload(io.BytesIO(content), mimetype=(file.content_type or "application/octet-stream"), resumable=False)
-            meta = {
-                "name": filename,
-                "parents": [subfolder_id],
+        # Ustal folder bazowy (root) zgodnie z FOLDER_ID/FILE_ID
+        root_id = env_root_id
+        try:
+            if not root_id or str(root_id).lower() == "root":
+                if file_id_sheet:
+                    meta = service.files().get(fileId=file_id_sheet, fields="id,mimeType,parents").execute()
+                    mime = meta.get("mimeType")
+                    parents = meta.get("parents", []) or []
+                    if mime == "application/vnd.google-apps.folder":
+                        root_id = file_id_sheet
+                    else:
+                        if parents:
+                            root_id = parents[0]
+        except Exception as re_err:
+            print(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
+        if not root_id:
+            root_id = "root"
+
+        # Znajdź/utwórz podfolder na nazwę produktu
+        q = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{root_id}' in parents and trashed=false"
+        resp = service.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
+        files_list = resp.get("files", [])
+        if files_list:
+            subfolder_id = files_list[0]["id"]
+        else:
+            meta_folder = {
+                "name": folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [root_id],
             }
-            flags_create_file = {"supportsAllDrives": True} if DRIVE_SUPPORTS_ALL == "1" else {}
-            created = service.files().create(body=meta, media_body=media, fields="id,name,webViewLink,webContentLink", **flags_create_file).execute()
-            file_id = created.get("id")
-            web_view = (created.get("webViewLink") or "")
-            web_content = (created.get("webContentLink") or "")
+            created_folder = service.files().create(body=meta_folder, fields="id,name,parents").execute()
+            subfolder_id = created_folder["id"]
 
-            # Publiczne uprawnienia (opcjonalnie)
-            try:
-                if DRIVE_PUBLIC == "1" and file_id:
-                    perm_body = {"type": "anyone", "role": "reader"}
-                    flags_perm = {"supportsAllDrives": True} if DRIVE_SUPPORTS_ALL == "1" else {}
-                    service.permissions().create(fileId=file_id, body=perm_body, **flags_perm).execute()
-            except Exception as pe:
-                # Ignoruj błędy uprawnień – tylko log
-                print(f"[Drive] Permission set failed (ignored): {pe}")
+        # Upload pliku do My Drive
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=content_type, resumable=False)
+        file_meta = {
+            "name": filename,
+            "parents": [subfolder_id],
+            "mimeType": content_type,
+        }
+        created = service.files().create(
+            body=file_meta,
+            media_body=media,
+            fields="id,name,webViewLink,webContentLink"
+        ).execute()
 
-            # Zbuduj URL do pobrania
-            url = web_content or (f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else web_view or "")
-            return {
-                "url": url,
-                "fileId": file_id,
-                "folderId": subfolder_id,
-                "filename": filename,
-                "size": len(content),
-            }
-    except Exception as e:
-        # Log i przejście do fallbacku lokalnego
-        print(f"[Drive] Upload failed -> fallback to local. Reason: {e}")
+        file_id = created.get("id")
+        web_view = (created.get("webViewLink") or "")
+        web_content = (created.get("webContentLink") or "")
 
-    # Fallback do lokalnego storage (serwowanego pod /files)
-    try:
-        product_dir = FILES_DIR / folder_name
-        product_dir.mkdir(parents=True, exist_ok=True)
-        target_path = product_dir / filename
-        with open(target_path, "wb") as f_out:
-            f_out.write(content)
-        url = f"/files/{folder_name}/{filename}"
+        # Publiczne uprawnienia (opcjonalnie)
+        try:
+            if DRIVE_PUBLIC == "1" and file_id:
+                perm_body = {"type": "anyone", "role": "reader"}
+                service.permissions().create(fileId=file_id, body=perm_body).execute()
+        except Exception as pe:
+            print(f"[Drive] Permission set failed (ignored): {pe}")
+
+        # URL do pobrania
+        url = web_content or (f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else web_view or "")
         return {
             "url": url,
-            "fileId": None,
-            "folderId": None,
+            "fileId": file_id,
+            "folderId": subfolder_id,
             "filename": filename,
             "size": len(content),
         }
-    except Exception as e2:
-        # Ostateczna porażka
-        raise HTTPException(status_code=500, detail=f"Nie udało się przesłać pliku (Drive i lokalny zapis nieudane): {e2}")
+    except Exception as e:
+        try:
+            from googleapiclient.errors import HttpError  # type: ignore
+        except Exception:
+            HttpError = None  # type: ignore
+        if HttpError and isinstance(e, HttpError):
+            status = getattr(e, "status_code", None) or (getattr(e, "resp", None).status if getattr(e, "resp", None) is not None else None)
+            try:
+                err_content = e.content.decode("utf-8") if isinstance(e.content, (bytes, bytearray)) else str(e.content)
+            except Exception:
+                err_content = str(e)
+            raise HTTPException(status_code=500, detail=f"Drive HttpError (status={status}): {err_content}")
+        raise HTTPException(status_code=500, detail=f"Nie udało się przesłać pliku do Google Drive (OAuth): {e}")
 
 @app.get("/api/health")
 def health():
