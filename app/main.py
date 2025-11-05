@@ -341,22 +341,34 @@ def _bootstrap_data_from_sheets() -> bool:
             print("[Bootstrap] Pomijam: brak klienta gspread albo FILE_ID")
             return False
 
-        # Odczytaj arkusze
+        # Odczytaj arkusze z dodatkowymi logami i fallbackami
         try:
+            # Pierwsza próba: open_by_key z FILE_ID
             sh = client.open_by_key(file_id)
+        except Exception as e_open1:
+            print(f"[Bootstrap] open_by_key({file_id}) failed: {e_open1}")
+            # Druga próba: przytnij FILE_ID z potencjalnych cudzysłowów/białych znaków
             try:
-                ws_c = sh.worksheet(SHEET_CONTAINERS_TITLE)
-                cont_rows = ws_c.get_all_records()
-            except Exception:
-                cont_rows = []
-            try:
-                ws_p = sh.worksheet(SHEET_PRODUCTS_TITLE)
-                prod_rows = ws_p.get_all_records()
-            except Exception:
-                prod_rows = []
-        except Exception as e:
-            print(f"[Bootstrap] Nie można otworzyć pliku Sheets: {e}")
-            return False
+                fid = str(file_id).strip().strip('"').strip("'")
+                sh = client.open_by_key(fid)
+                print("[Bootstrap] open_by_key(trimmed) OK")
+            except Exception as e_open2:
+                print(f"[Bootstrap] open_by_key(trimmed) failed: {e_open2}")
+                return False
+        # Odczyt zakładek – kontenery
+        try:
+            ws_c = sh.worksheet(SHEET_CONTAINERS_TITLE)
+            cont_rows = ws_c.get_all_records()
+        except Exception as e_cont:
+            print(f"[Bootstrap] Read containers sheet '{SHEET_CONTAINERS_TITLE}' failed: {e_cont}")
+            cont_rows = []
+        # Odczyt zakładek – produkty
+        try:
+            ws_p = sh.worksheet(SHEET_PRODUCTS_TITLE)
+            prod_rows = ws_p.get_all_records()
+        except Exception as e_prod:
+            print(f"[Bootstrap] Read products sheet '{SHEET_PRODUCTS_TITLE}' failed: {e_prod}")
+            prod_rows = []
 
         # Id deterministyczne
         from hashlib import sha1
