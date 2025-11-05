@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -44,20 +44,12 @@ def _load_env_from_file():
                 v = v[1:-1]
             # Rozwiń sekwencje \n (np. w PRIVATE_KEY)
             v = v.replace("\\n", "\n")
-            # Nadpisuj wartości z .env, aby odświeżenia konfiguracji były widoczne w runtime
-            os.environ[k] = v
+            os.environ.setdefault(k, v)
     except Exception:
         # Ignoruj błędy parsowania
         pass
 
 _load_env_from_file()
-# Zezwól na HTTP dla lokalnego flow OAuth (tylko dev)
-try:
-    rd = os.environ.get("OAUTH_REDIRECT_URI", "")
-    if rd.startswith("http://") and "localhost" in rd and not os.environ.get("OAUTHLIB_INSECURE_TRANSPORT"):
-        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-except Exception:
-    pass
 # W Vercel filesystem jest read-only; zapisy dozwolone tylko w /tmp (efemeryczne)
 IS_VERCEL = bool(os.environ.get("VERCEL") or os.environ.get("NOW_REGION"))
 DATA_DIR = Path("/tmp/china_import") if IS_VERCEL else (BASE_DIR / "data")
@@ -327,163 +319,6 @@ def _on_added_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str
     print(f"[Sheets] Product sync {'OK' if ok else 'FAILED'} (containerId={rec['containerId']})")
     return ok
 
-
-def _bootstrap_data_from_sheets() -> bool:
-    """
-    Wczytuje dane z Google Sheets (containers, products) i zapisuje do lokalnej bazy (data/containers.json).
-    Uruchamiane przy starcie aplikacji gdy SHEETS_BOOTSTRAP_ON_START=1 (domyślnie).
-    """
-    try:
-        _load_env_from_file()
-        client = _get_gspread_client()
-        file_id = os.environ.get("FILE_ID")
-        if not client or not file_id:
-            print("[Bootstrap] Pomijam: brak klienta gspread albo FILE_ID")
-            return False
-
-        # Odczytaj arkusze
-        try:
-            sh = client.open_by_key(file_id)
-            try:
-                ws_c = sh.worksheet(SHEET_CONTAINERS_TITLE)
-                cont_rows = ws_c.get_all_records()
-            except Exception:
-                cont_rows = []
-            try:
-                ws_p = sh.worksheet(SHEET_PRODUCTS_TITLE)
-                prod_rows = ws_p.get_all_records()
-            except Exception:
-                prod_rows = []
-        except Exception as e:
-            print(f"[Bootstrap] Nie można otworzyć pliku Sheets: {e}")
-            return False
-
-        # Id deterministyczne
-        from hashlib import sha1
-
-        def _sid(*parts: str) -> int:
-            raw = "|".join([str(p or "").strip() for p in parts])
-            h = sha1(raw.encode("utf-8")).hexdigest()[:12]
-            return int(h, 16)
-
-        # Indeksy produktów
-        prod_by_container_id: Dict[int, List[Dict[str, Any]]] = {}
-        prod_by_container_name: Dict[str, List[Dict[str, Any]]] = {}
-        for idx, r in enumerate(prod_rows):
-            name = str(r.get("name", "")).strip()
-            if not name:
-                continue
-            prod = {
-                "name": name,
-                "quantity": str(r.get("quantity", "")).strip(),
-                "totalPrice": str(r.get("totalPrice", "")).strip(),
-                "totalPriceCurrency": (str(r.get("totalPriceCurrency", "USD")).strip() or "USD"),
-                "productCbm": str(r.get("productCbm", "")).strip(),
-                "customsDutyPercent": str(r.get("customsDutyPercent", "")).strip(),
-                "files": [],
-            }
-            cid_raw = r.get("containerId")
-            cid = None
-            try:
-                cid = int(cid_raw) if cid_raw not in (None, "") else None
-            except Exception:
-                cid = None
-            cname = str(r.get("containerName", "")).strip()
-            prod["id"] = _sid(name, cname or str(cid or ""), str(idx))
-            if cid is not None:
-                prod_by_container_id.setdefault(cid, []).append(prod)
-            elif cname:
-                key = cname.lower()
-                prod_by_container_name.setdefault(key, []).append(prod)
-
-        containers: List[Dict[str, Any]] = []
-        for r in cont_rows:
-            c = _map_sheet_container(r)
-            cname = c.get("name", "")
-            # Przypnij produkty po nazwie
-            plist = []
-            if cname:
-                key = cname.lower()
-                plist = prod_by_container_name.get(key, [])
-
-            # Spróbuj odczytać id kontenera z produktów (containerId)
-            cid = None
-            if cname:
-                for rprod in prod_rows:
-                    if str(rprod.get("containerName", "")).strip() == cname:
-                        try:
-                            cid_raw = rprod.get("containerId")
-                            cid = int(cid_raw) if cid_raw not in (None, "") else None
-                            if cid is not None:
-                                break
-                        except Exception:
-                            cid = None
-            if cid is None:
-                cid = _sid(cname, c.get("orderDate", ""))
-
-            c_obj: Dict[str, Any] = {**c}
-            c_obj["id"] = cid
-            c_obj["pickupDate"] = _calc_pickup_date(c_obj.get("orderDate"), c_obj.get("productionDays"))
-            c_obj["products"] = plist.copy()
-            containers.append(c_obj)
-
-        # Dołącz produkty przypięte po containerId
-        for cid_key, plist in prod_by_container_id.items():
-            found = None
-            for c in containers:
-                if c.get("id") == cid_key:
-                    found = c
-                    break
-            if found is None:
-                # Stwórz placeholder kontener
-                cname_guess = ""
-                for rprod in prod_rows:
-                    try:
-                        if int(rprod.get("containerId")) == cid_key:
-                            cname_guess = str(rprod.get("containerName", "")).strip()
-                            if cname_guess:
-                                break
-                    except Exception:
-                        continue
-                cont = {
-                    "name": cname_guess or f"Container-{cid_key}",
-                    "orderDate": "",
-                    "paymentDate": None,
-                    "productionDays": "",
-                    "deliveryDate": None,
-                    "exchangeRate": "4.0",
-                    "containerCost": "",
-                    "containerCostCurrency": "USD",
-                    "customsClearanceCost": "",
-                    "customsClearanceCostCurrency": "USD",
-                    "transportChinaCost": "",
-                    "transportChinaCostCurrency": "USD",
-                    "transportPolandCost": "",
-                    "transportPolandCostCurrency": "USD",
-                    "insuranceCost": "",
-                    "insuranceCostCurrency": "USD",
-                    "totalTransportCbm": "",
-                    "additionalCosts": "",
-                    "additionalCostsCurrency": "USD",
-                    "pickedUpInChina": False,
-                    "customsClearanceDone": False,
-                    "deliveredToWarehouse": False,
-                    "documentsInSystem": False,
-                    "id": cid_key,
-                    "pickupDate": None,
-                    "products": plist.copy(),
-                }
-                containers.append(cont)
-            else:
-                found["products"].extend(plist)
-
-        _save_data(containers)
-        print(f"[Bootstrap] Załadowano z Google Sheets: containers={len(containers)}")
-        return True
-    except Exception as e:
-        print(f"[Bootstrap] Błąd: {e}")
-        return False
-
 class ProductIn(BaseModel):
     name: str
     quantity: str
@@ -581,16 +416,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Bootstrap danych z Google Sheets przy starcie aplikacji
-@app.on_event("startup")
-def _startup_load_from_sheets():
-    try:
-        if os.environ.get("SHEETS_BOOTSTRAP_ON_START", "1") == "1":
-            ok = _bootstrap_data_from_sheets()
-            print(f"[Startup] Bootstrap from Sheets {'OK' if ok else 'SKIPPED/FAILED'}")
-    except Exception as e:
-        print(f"[Startup] Bootstrap error: {e}")
-
 # Serwowanie plików statycznych
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
@@ -603,9 +428,12 @@ app.mount("/files", StaticFiles(directory=str(FILES_DIR), html=False), name="fil
 @app.post("/api/files/upload")
 async def upload_product_file(productName: str = Form(...), file: UploadFile = File(...)):
     """
-    Upload WYŁĄCZNIE do Google Drive przez OAuth użytkownika (My Drive).
-    Wymagane .env: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN.
-    Folder docelowy: FOLDER_ID; jeśli puste lub 'root' – zostanie użyty folder rodzica pliku FILE_ID.
+    Uploaduje plik do Google Drive (jeśli skonfigurowany), z bezpiecznym fallbackiem do lokalnego storage:
+    - tworzy/znajduje podfolder o nazwie produktu pod DRIVE_ROOT_FOLDER_ID
+    - przesyła plik do tego folderu
+    - opcjonalnie ustawia publiczne uprawnienia (DRIVE_PUBLIC=1)
+    - jeśli integracja Drive jest niedostępna lub wystąpi błąd, zapisuje plik lokalnie do /files
+    - zwraca URL do pobrania
     """
     import re
     import io
@@ -615,124 +443,99 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
         s = s.strip().replace(" ", "_")
         return s[:100] or "file"
 
-    # Konfiguracja OAuth i Folder ID
     _load_env_from_file()
-    env_root_id = os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
-    file_id_sheet = os.environ.get("FILE_ID")
-
-    client_id = os.environ.get("OAUTH_CLIENT_ID")
-    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
-    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
-    token_uri = os.environ.get("OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token")
-    if not client_id or not client_secret or not refresh_token:
-        raise HTTPException(status_code=500, detail="Brak konfiguracji OAuth (wymagane: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN)")
-
-    # Przygotowanie danych pliku
     folder_name = sanitize(productName or "product")
     filename = sanitize(getattr(file, "filename", "file"))
-    content_type = file.content_type or "application/octet-stream"
+
     content = await file.read()
     await file.close()
 
+    # Najpierw próba Google Drive
     try:
-        # Budowa poświadczeń OAuth użytkownika i odświeżenie tokenu
-        from google.oauth2.credentials import Credentials  # type: ignore
-        from google.auth.transport.requests import Request  # type: ignore
-        from googleapiclient.discovery import build  # type: ignore
-        from googleapiclient.http import MediaIoBaseUpload  # type: ignore
-        from googleapiclient.errors import HttpError  # type: ignore
+        root_id = os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
+        info = _get_service_account_info()
+        if root_id and info:
+            from google.oauth2.service_account import Credentials  # type: ignore
+            from googleapiclient.discovery import build  # type: ignore
+            from googleapiclient.http import MediaIoBaseUpload  # type: ignore
 
-        creds = Credentials(
-            token=None,
-            refresh_token=refresh_token,
-            token_uri=token_uri,
-            client_id=client_id,
-            client_secret=client_secret,
-            scopes=DRIVE_SCOPES,
-        )
-        try:
-            creds.refresh(Request())
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"OAuth refresh failed: {e}")
+            creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
+            # Wyłącz cache_discovery by unikać zapisu plików cache w środowiskach read-only
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        # Ustal docelowy folder: FOLDER_ID lub folder zawierający plik z FILE_ID
-        root_id = env_root_id
-        try:
-            if not root_id or str(root_id).lower() == "root":
-                if file_id_sheet:
-                    meta_parent = service.files().get(fileId=file_id_sheet, fields="parents").execute()
-                    parents = meta_parent.get("parents", [])
-                    if parents:
-                        root_id = parents[0]
-        except Exception as re:
-            print(f"[Drive] Resolve parent of FILE_ID failed: {re}")
-        if not root_id:
-            root_id = "root"
+            # Znajdź lub utwórz podfolder
+            q = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{root_id}' in parents and trashed=false"
+            flags_list = {}
+            flags_create = {}
+            if DRIVE_SUPPORTS_ALL == "1":
+                flags_list = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
+                flags_create = {"supportsAllDrives": True}
+            resp = service.files().list(q=q, fields="files(id,name)", pageSize=1, **flags_list).execute()
+            files_list = resp.get("files", [])
+            if files_list:
+                subfolder_id = files_list[0]["id"]
+            else:
+                meta = {
+                    "name": folder_name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [root_id],
+                }
+                created_folder = service.files().create(body=meta, fields="id,name,parents", **flags_create).execute()
+                subfolder_id = created_folder["id"]
 
-        # Znajdź lub utwórz podfolder w My Drive użytkownika
-        q = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{root_id}' in parents and trashed=false"
-        resp = service.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
-        files_list = resp.get("files", [])
-        if files_list:
-            subfolder_id = files_list[0]["id"]
-        else:
-            meta_folder = {
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [root_id],
+            # Upload pliku do Drive
+            media = MediaIoBaseUpload(io.BytesIO(content), mimetype=(file.content_type or "application/octet-stream"), resumable=False)
+            meta = {
+                "name": filename,
+                "parents": [subfolder_id],
             }
-            created_folder = service.files().create(body=meta_folder, fields="id,name,parents").execute()
-            subfolder_id = created_folder["id"]
+            flags_create_file = {"supportsAllDrives": True} if DRIVE_SUPPORTS_ALL == "1" else {}
+            created = service.files().create(body=meta, media_body=media, fields="id,name,webViewLink,webContentLink", **flags_create_file).execute()
+            file_id = created.get("id")
+            web_view = (created.get("webViewLink") or "")
+            web_content = (created.get("webContentLink") or "")
 
-        # Upload pliku do My Drive
-        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=content_type, resumable=False)
-        file_meta = {
-            "name": filename,
-            "parents": [subfolder_id],
-            "mimeType": content_type,
-        }
-        created = service.files().create(
-            body=file_meta,
-            media_body=media,
-            fields="id,name,webViewLink,webContentLink"
-        ).execute()
+            # Publiczne uprawnienia (opcjonalnie)
+            try:
+                if DRIVE_PUBLIC == "1" and file_id:
+                    perm_body = {"type": "anyone", "role": "reader"}
+                    flags_perm = {"supportsAllDrives": True} if DRIVE_SUPPORTS_ALL == "1" else {}
+                    service.permissions().create(fileId=file_id, body=perm_body, **flags_perm).execute()
+            except Exception as pe:
+                # Ignoruj błędy uprawnień – tylko log
+                print(f"[Drive] Permission set failed (ignored): {pe}")
 
-        file_id = created.get("id")
-        web_view = (created.get("webViewLink") or "")
-        web_content = (created.get("webContentLink") or "")
+            # Zbuduj URL do pobrania
+            url = web_content or (f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else web_view or "")
+            return {
+                "url": url,
+                "fileId": file_id,
+                "folderId": subfolder_id,
+                "filename": filename,
+                "size": len(content),
+            }
+    except Exception as e:
+        # Log i przejście do fallbacku lokalnego
+        print(f"[Drive] Upload failed -> fallback to local. Reason: {e}")
 
-        # Publiczne uprawnienia (opcjonalnie)
-        try:
-            if DRIVE_PUBLIC == "1" and file_id:
-                perm_body = {"type": "anyone", "role": "reader"}
-                service.permissions().create(fileId=file_id, body=perm_body).execute()
-        except Exception as pe:
-            print(f"[Drive] Permission set failed (ignored): {pe}")
-
-        # Zbuduj URL do pobrania
-        url = web_content or (f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else web_view or "")
+    # Fallback do lokalnego storage (serwowanego pod /files)
+    try:
+        product_dir = FILES_DIR / folder_name
+        product_dir.mkdir(parents=True, exist_ok=True)
+        target_path = product_dir / filename
+        with open(target_path, "wb") as f_out:
+            f_out.write(content)
+        url = f"/files/{folder_name}/{filename}"
         return {
             "url": url,
-            "fileId": file_id,
-            "folderId": subfolder_id,
+            "fileId": None,
+            "folderId": None,
             "filename": filename,
             "size": len(content),
         }
-    except Exception as e:
-        # Specjalna obsługa HttpError
-        try:
-            from googleapiclient.errors import HttpError  # type: ignore
-        except Exception:
-            HttpError = None  # type: ignore
-        if HttpError and isinstance(e, HttpError):
-            status = getattr(e, "status_code", None) or (getattr(e, "resp", None).status if getattr(e, "resp", None) is not None else None)
-            try:
-                err_content = e.content.decode("utf-8") if isinstance(e.content, (bytes, bytearray)) else str(e.content)
-            except Exception:
-                err_content = str(e)
-            raise HTTPException(status_code=500, detail=f"Drive HttpError (status={status}): {err_content}")
-        raise HTTPException(status_code=500, detail=f"Nie udało się przesłać pliku do Google Drive (OAuth): {e}")
+    except Exception as e2:
+        # Ostateczna porażka
+        raise HTTPException(status_code=500, detail=f"Nie udało się przesłać pliku (Drive i lokalny zapis nieudane): {e2}")
 
 @app.get("/api/health")
 def health():
@@ -1010,130 +813,3 @@ def index():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
-# OAuth helper endpoints: generate consent URL and exchange code to get a refresh token
-@app.get("/api/oauth/url")
-def oauth_url(redirect_uri: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Zwraca URL autoryzacyjny Google OAuth (scope: Drive) z parametrami:
-    - access_type=offline (żeby uzyskać refresh_token),
-    - prompt=consent (wymusza refresh_token przy ponownej zgodzie).
-    Wymagane w .env: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET.
-    Opcjonalnie: OAUTH_REDIRECT_URI (domyślnie http://127.0.0.1:8000/api/oauth/callback)
-    """
-    _load_env_from_file()
-    client_id = os.environ.get("OAUTH_CLIENT_ID")
-    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        return {"error": "Brak OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET w .env"}
-
-    redirect_uri = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI") or "http://127.0.0.1:8000/api/oauth/callback"
-    try:
-        from google_auth_oauthlib.flow import Flow  # type: ignore
-
-        client_config = {
-            "web": {
-                "client_id": client_id,
-                "project_id": os.environ.get("PROJECT_ID", ""),
-                "auth_uri": os.environ.get("AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
-                "token_uri": os.environ.get("TOKEN_URI", "https://oauth2.googleapis.com/token"),
-                "client_secret": client_secret,
-                "redirect_uris": [redirect_uri],
-            }
-        }
-        flow = Flow.from_client_config(client_config, scopes=DRIVE_SCOPES, redirect_uri=redirect_uri)
-        auth_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-        return {
-            "auth_url": auth_url,
-            "state": state,
-            "redirect_uri": redirect_uri,
-            "scopes": DRIVE_SCOPES,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/oauth/callback")
-def oauth_callback(request: Request, state: Optional[str] = None, redirect_uri: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Callback dla OAuth: wymienia ?code=... na tokeny i zwraca refresh_token.
-    - Zapisuje też tokeny do data/oauth_token.json (dla podglądu lokalnego).
-    Po otrzymaniu refresh_token:
-    - dodaj do .env: ***REMOVED***
-    - zrestartuj serwer
-    """
-    _load_env_from_file()
-    client_id = os.environ.get("OAUTH_CLIENT_ID")
-    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
-    token_uri = os.environ.get("OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token")
-    if not client_id or not client_secret:
-        return {"error": "Brak OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET w .env"}
-
-    redirect_uri = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI") or "http://127.0.0.1:8000/api/oauth/callback"
-
-    try:
-        from google_auth_oauthlib.flow import Flow  # type: ignore
-
-        client_config = {
-            "web": {
-                "client_id": client_id,
-                "project_id": os.environ.get("PROJECT_ID", ""),
-                "auth_uri": os.environ.get("AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
-                "token_uri": token_uri,
-                "client_secret": client_secret,
-                "redirect_uris": [redirect_uri],
-            }
-        }
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=DRIVE_SCOPES,
-            redirect_uri=redirect_uri,
-            state=state,
-        )
-        # Pełny URL z query (code, state, itp.)
-        authorization_response = str(request.url)
-        flow.fetch_token(authorization_response=authorization_response)
-
-        creds = flow.credentials
-        refresh_token = getattr(creds, "refresh_token", None)
-        access_token = getattr(creds, "token", None)
-
-        # Zapisz lokalnie (podgląd). W produkcji wstaw do .env/Vercel vars.
-        try:
-            token_path = DATA_DIR / "oauth_token.json"
-            token_payload = {
-                "refresh_token": refresh_token,
-                "access_token": access_token,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "token_uri": token_uri,
-                "scopes": DRIVE_SCOPES,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            token_path.write_text(json.dumps(token_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            saved_to = str(token_path)
-        except Exception:
-            saved_to = None
-
-        return {
-            "message": "Uzyskano refresh_token. Skopiuj do .env jako OAUTH_REFRESH_TOKEN i zrestartuj serwer.",
-            "refresh_token": refresh_token,
-            "access_token": access_token,
-            "saved_to": saved_to,
-        }
-    except Exception as e:
-        try:
-            from googleapiclient.errors import HttpError  # type: ignore
-        except Exception:
-            HttpError = None  # type: ignore
-        if HttpError and isinstance(e, HttpError):
-            status = getattr(e, "status_code", None) or (getattr(e, "resp", None).status if getattr(e, "resp", None) is not None else None)
-            try:
-                err_content = e.content.decode("utf-8") if isinstance(e.content, (bytes, bytearray)) else str(e.content)
-            except Exception:
-                err_content = str(e)
-            raise HTTPException(status_code=500, detail=f"OAuth HttpError (status={status}): {err_content}")
-        raise HTTPException(status_code=500, detail=f"OAuth callback error: {e}")

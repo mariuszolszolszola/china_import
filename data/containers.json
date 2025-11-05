@@ -102,30 +102,6 @@
         "customsDutyPercent": "6",
         "files": [],
         "id": 1762342031807
-      },
-      {
-        "name": "erterte",
-        "quantity": "6",
-        "totalPrice": "6",
-        "totalPriceCurrency": "USD",
-        "productCbm": "6",
-        "customsDutyPercent": "6",
-        "files": [
-          "/files/erterte/import-tracker.tsx"
-        ],
-        "id": 1762343799506
-      },
-      {
-        "name": "nnnnn",
-        "quantity": "6",
-        "totalPrice": "6",
-        "totalPriceCurrency": "USD",
-        "productCbm": "6",
-        "customsDutyPercent": "6",
-        "files": [
-          "https://drive.google.com/uc?id=1_uocfxxeAXGFg_EtKql5_qc6wnhERNl4&export=download"
-        ],
-        "id": 1762350620274
       }
     ]
   },
@@ -187,18 +163,6 @@
         "customsDutyPercent": "6",
         "files": [],
         "id": 1762342168931
-      },
-      {
-        "name": "erterte",
-        "quantity": "6",
-        "totalPrice": "6",
-        "totalPriceCurrency": "USD",
-        "productCbm": "6",
-        "customsDutyPercent": "6",
-        "files": [
-          "https://drive.google.com/uc?id=1yEZ2cdiRraoL_VTmcZGRv895LUVxRh8T&export=download"
-        ],
-        "id": 1762350442453
       }
     ]
   },
@@ -258,30 +222,6 @@
         "customsDutyPercent": "4",
         "files": [],
         "id": 1762342728868
-      },
-      {
-        "name": "nowy p",
-        "quantity": "5",
-        "totalPrice": "5",
-        "totalPriceCurrency": "USD",
-        "productCbm": "5",
-        "customsDutyPercent": "5",
-        "files": [
-          "/files/nowy_p/import-tracker.tsx"
-        ],
-        "id": 1762344003603
-      },
-      {
-        "name": "dfgdfg",
-        "quantity": "5",
-        "totalPrice": "5",
-        "totalPriceCurrency": "USD",
-        "productCbm": "5",
-        "customsDutyPercent": "5",
-        "files": [
-          "https://drive.google.com/uc?id=1ee9eyiEhu4Hq-bcphDJHaFkHRy1dCgjt&export=download"
-        ],
-        "id": 1762350926687
       }
     ]
   }

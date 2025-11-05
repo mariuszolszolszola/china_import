@@ -8,7 +8,6 @@ __pycache__/
 .python-version
 
 # Env
-.env
 .venv/
 venv/
 env/
