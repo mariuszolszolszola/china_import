@@ -896,8 +896,31 @@ els.containerList.addEventListener("change", async (ev) => {
   }
 });
 
+// Wersja aplikacji – pobierz short SHA i pokaż w badge
+async function updateVersionBadge() {
+  const el = document.getElementById("versionBadge");
+  if (!el) return;
+  try {
+    const res = await fetch("/api/version", { method: "GET" });
+    if (!res.ok) throw new Error("version fetch failed");
+    const data = await res.json();
+    const sha = String(data?.shortSha || data?.version || "").trim();
+    el.textContent = sha || "local";
+    if (data?.env) el.title = "Wersja aplikacji (" + String(data.env) + ")";
+    el.classList.remove("hidden");
+  } catch (_) {
+    el.textContent = "local";
+    el.classList.remove("hidden");
+  }
+}
 /* Inicjalizacja */
 window.addEventListener("DOMContentLoaded", () => {
   loadSheets();
   loadContainers();
+});
+// Auto-init wersji w prawym górnym rogu
+window.addEventListener("DOMContentLoaded", () => {
+  if (typeof updateVersionBadge === "function") {
+    updateVersionBadge();
+  }
 });

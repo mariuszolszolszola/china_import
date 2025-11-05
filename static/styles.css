@@ -325,3 +325,25 @@ body {
 
 /* Narzędzia */
 .hidden { display: none !important; }
+
+/* Wersja aplikacji – badge w prawym górnym rogu */
+.version-badge {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 1000;
+  background: #111827; /* gray-900 */
+  color: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  box-shadow: var(--shadow);
+  opacity: 0.9;
+  user-select: none;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.version-badge:hover { opacity: 1; }

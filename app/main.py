@@ -5,6 +5,7 @@ import os
 import threading
 import base64
 import secrets
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -78,6 +79,23 @@ def _calc_pickup_date(order_date: Optional[str], production_days: Optional[str])
         dt = datetime.strptime(order_date, "%Y-%m-%d")
         days = int(float(production_days))
         return (dt + timedelta(days=days)).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+def _get_short_sha() -> Optional[str]:
+    # Preferowane zmienne środowiskowe (Vercel/CI)
+    sha = (
+        os.environ.get("VERCEL_GIT_COMMIT_SHA")
+        or os.environ.get("GIT_COMMIT_SHA")
+        or os.environ.get("SHORT_SHA")
+        or os.environ.get("COMMIT_SHA")
+    )
+    if sha:
+        return str(sha)[:7]
+    # Fallback lokalny – jeśli dostępny git w repo
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.STDOUT)
+        return out.decode("utf-8").strip()
     except Exception:
         return None
 
@@ -405,7 +423,7 @@ def _basic_auth_enabled() -> bool:
     return bool(os.environ.get("BASIC_AUTH_USERNAME")) and bool(os.environ.get("BASIC_AUTH_PASSWORD"))
 
 def _basic_auth_skip_path(path: str) -> bool:
-    exclude = {"/api/oauth/callback", "/api/oauth/url", "/api/health"}
+    exclude = {"/api/oauth/callback", "/api/oauth/url", "/api/health", "/api/version"}
     extra = os.environ.get("BASIC_AUTH_EXCLUDE", "")
     for p in [s.strip() for s in extra.split(",") if s.strip()]:
         exclude.add(p)
@@ -436,6 +454,19 @@ async def _basic_auth_middleware(request: Request, call_next):
 # Serwowanie plików statycznych
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
+
+# Endpoint wersji – zwraca short SHA commita i środowisko
+@app.get("/api/version")
+def api_version() -> Dict[str, Any]:
+    _load_env_from_file()
+    sha = _get_short_sha()
+    env = os.environ.get("VERCEL_ENV") or ("production" if os.environ.get("VERCEL") else "development")
+    return {
+        "version": sha or "local",
+        "shortSha": sha or None,
+        "env": env,
+        "serverTime": datetime.utcnow().isoformat() + "Z",
+    }
 
 # Upload plików produktów → Google Drive
 @app.post("/api/files/upload")
