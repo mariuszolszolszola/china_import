@@ -341,36 +341,6 @@ def _bootstrap_data_from_sheets() -> bool:
             print("[Bootstrap] Pomijam: brak klienta gspread albo FILE_ID")
             return False
 
-        # Ustal właściwy ID arkusza: jeśli FILE_ID wskazuje folder – znajdź Spreadsheet w tym folderze
-        try:
-            from google.oauth2.service_account import Credentials  # type: ignore
-            from googleapiclient.discovery import build  # type: ignore
-            sa_info = _get_service_account_info()
-            drive_sa = None
-            if sa_info:
-                creds_sa = Credentials.from_service_account_info(sa_info, scopes=DRIVE_SCOPES)
-                drive_sa = build("drive", "v3", credentials=creds_sa, cache_discovery=False)
-            if drive_sa:
-                meta = drive_sa.files().get(fileId=file_id, fields="id,mimeType,parents,name").execute()
-                mime = meta.get("mimeType")
-                if mime != "application/vnd.google-apps.spreadsheet":
-                    # Jeśli to folder – wyszukaj pierwszy arkusz w tym folderze
-                    if mime == "application/vnd.google-apps.folder":
-                        q = f"mimeType='application/vnd.google-apps.spreadsheet' and '{file_id}' in parents and trashed=false"
-                        resp = drive_sa.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
-                        fl = resp.get("files", [])
-                        if fl:
-                            file_id = fl[0]["id"]
-                            print(f"[Bootstrap] Resolved spreadsheet in folder: {fl[0].get('name')} ({file_id})")
-                        else:
-                            print("[Bootstrap] Folder FILE_ID nie zawiera arkusza (brak spreadsheet)")
-                            return False
-                    else:
-                        print(f"[Bootstrap] FILE_ID mimeType nieobsługiwany: {mime}")
-                        return False
-        except Exception as e_res:
-            print(f"[Bootstrap] Drive meta resolve failed: {e_res}")
-
         # Odczytaj arkusze z dodatkowymi logami i fallbackami
         try:
             # Pierwsza próba: open_by_key z FILE_ID
@@ -703,20 +673,10 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
         try:
             if not root_id or str(root_id).lower() == "root":
                 if file_id_sheet:
-                    meta = service.files().get(fileId=file_id_sheet, fields="id,mimeType,parents").execute()
-                    mime = meta.get("mimeType")
-                    parents = meta.get("parents", []) or []
-                    if mime == "application/vnd.google-apps.folder":
-                        # Jeżeli FILE_ID to folder – użyj go bezpośrednio
-                        root_id = file_id_sheet
-                    elif mime == "application/vnd.google-apps.spreadsheet":
-                        # Arkusz – użyj jego folderu nadrzędnego
-                        if parents:
-                            root_id = parents[0]
-                    else:
-                        # Inny typ – próbuj użyć rodzica jeśli jest
-                        if parents:
-                            root_id = parents[0]
+                    meta_parent = service.files().get(fileId=file_id_sheet, fields="parents").execute()
+                    parents = meta_parent.get("parents", [])
+                    if parents:
+                        root_id = parents[0]
         except Exception as re:
             print(f"[Drive] Resolve parent of FILE_ID failed: {re}")
         if not root_id:
