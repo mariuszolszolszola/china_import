@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import os
 import threading
+import base64
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 # TODO: Basic Auth (przygotowanie)
@@ -50,28 +52,20 @@ def _load_env_from_file():
         pass
 
 _load_env_from_file()
-# W Vercel filesystem jest read-only; zapisy dozwolone tylko w /tmp (efemeryczne)
-IS_VERCEL = bool(os.environ.get("VERCEL") or os.environ.get("NOW_REGION"))
-DATA_DIR = Path("/tmp/china_import") if IS_VERCEL else (BASE_DIR / "data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DATA_FILE = DATA_DIR / "containers.json"
-
-# jeśli plik nie istnieje, zainicjalizuj pustą listą
-if not DATA_FILE.exists():
-    DATA_FILE.write_text("[]", encoding="utf-8")
-
-_file_lock = threading.Lock()
+# Brak lokalnego zapisu – dane wyłącznie w pamięci (in-memory)
+_data_lock = threading.Lock()
+_mem_data: List[Dict[str, Any]] = []
 
 def _load_data() -> List[Dict[str, Any]]:
-    with _file_lock:
-        try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
+    # Zwracamy kopię płytką listy, aby uniknąć modyfikowania globalnego stanu poza lockiem
+    with _data_lock:
+        return [dict(item) for item in _mem_data]
 
 def _save_data(data: List[Dict[str, Any]]) -> None:
-    with _file_lock:
-        DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Aktualizacja wyłącznie w pamięci
+    global _mem_data
+    with _data_lock:
+        _mem_data = [dict(item) for item in data]
 
 def _next_id() -> int:
     # millisecond timestamp based id
@@ -156,21 +150,8 @@ def _get_gspread_client():
     except Exception as e2:
         print(f"[Sheets] Credentials fallback failed: {e2}")
 
-    # Final fallback: temp JSON file
-    try:
-        sa_path = DATA_DIR / "sa_temp.json"
-        with open(sa_path, "w", encoding="utf-8") as f:
-            json.dump(info, f)
-        client = gspread.service_account(filename=str(sa_path), scopes=SHEETS_SCOPES)
-        try:
-            os.remove(sa_path)
-        except Exception:
-            pass
-        globals()["_GSPREAD_CLIENT"] = client
-        return client
-    except Exception as e3:
-        print(f"[Sheets] service_account(filename) fallback failed: {e3}")
-        return None
+    # Final fallback wyłączony – brak lokalnego zapisu do plików
+    return None
 
 def _sheet_records(title: str):
     client = _get_gspread_client()
@@ -416,13 +397,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Basic Auth middleware (global)
+# Wymagane w .env: BASIC_AUTH_USERNAME, BASIC_AUTH_PASSWORD
+# Opcjonalnie: BASIC_AUTH_EXCLUDE=/api/oauth/callback,/api/oauth/url,/api/health
+def _basic_auth_enabled() -> bool:
+    _load_env_from_file()
+    return bool(os.environ.get("BASIC_AUTH_USERNAME")) and bool(os.environ.get("BASIC_AUTH_PASSWORD"))
+
+def _basic_auth_skip_path(path: str) -> bool:
+    exclude = {"/api/oauth/callback", "/api/oauth/url", "/api/health"}
+    extra = os.environ.get("BASIC_AUTH_EXCLUDE", "")
+    for p in [s.strip() for s in extra.split(",") if s.strip()]:
+        exclude.add(p)
+    return path in exclude
+
+@app.middleware("http")
+async def _basic_auth_middleware(request: Request, call_next):
+    try:
+        if _basic_auth_skip_path(request.url.path) or not _basic_auth_enabled():
+            return await call_next(request)
+        auth = request.headers.get("Authorization")
+        if not auth or not auth.startswith("Basic "):
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Restricted"'})
+        try:
+            decoded = base64.b64decode(auth[6:].strip()).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except Exception:
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Restricted"'})
+        u = os.environ.get("BASIC_AUTH_USERNAME", "")
+        p = os.environ.get("BASIC_AUTH_PASSWORD", "")
+        if not (secrets.compare_digest(username, u) and secrets.compare_digest(password, p)):
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Restricted"'})
+        return await call_next(request)
+    except Exception:
+        # W razie problemów w middleware nie blokuj ruchu
+        return await call_next(request)
+
 # Serwowanie plików statycznych
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
-# Serwowanie plików przesłanych (dla pobrań)
-FILES_DIR = DATA_DIR / "files"
-FILES_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/files", StaticFiles(directory=str(FILES_DIR), html=False), name="files")
 
 # Upload plików produktów → Google Drive
 @app.post("/api/files/upload")
@@ -500,6 +513,22 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
         except Exception as re_err:
             print(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
         if not root_id:
+            root_id = "root"
+        # Weryfikacja dostępu do folderu root_id dla użytkownika OAuth; w razie braku dostępu – fallback do 'root'
+        try:
+            if root_id and str(root_id).lower() != "root":
+                # sprawdź czy folder istnieje i jest dostępny
+                service.files().get(fileId=root_id, fields="id").execute()
+        except HttpError as he:
+            # typowo: 404 'File not found' lub 403 'insufficientFilePermissions'
+            try:
+                err_msg = he.content.decode("utf-8") if isinstance(he.content, (bytes, bytearray)) else str(he.content)
+            except Exception:
+                err_msg = str(he)
+            print(f"[Drive] Root folder '{root_id}' niedostępny dla konta OAuth – fallback do 'root': {err_msg}")
+            root_id = "root"
+        except Exception as ge:
+            print(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
             root_id = "root"
 
         # Znajdź/utwórz podfolder na nazwę produktu
