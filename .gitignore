@@ -36,3 +36,4 @@ dist/
 
 # Node (na wszelki wypadek, choć nieużywane)
 node_modules/.env
+data/oauth_token.json
