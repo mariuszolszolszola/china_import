@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Import Tracker Favicon</title>
+  <rect x="10" y="16" width="44" height="32" rx="6" fill="#4f46e5"/>
+  <g stroke="#ffffff" stroke-width="2" opacity="0.9">
+    <line x1="18" y1="20" x2="18" y2="44"/>
+    <line x1="26" y1="20" x2="26" y2="44"/>
+    <line x1="34" y1="20" x2="34" y2="44"/>
+    <line x1="42" y1="20" x2="42" y2="44"/>
+  </g>
+  <rect x="10" y="16" width="44" height="6" rx="6" fill="#4338ca" opacity="0.9"/>
+  <circle cx="45" cy="42" r="6" fill="#16a34a" />
+  <path d="M42 42 l2 2 l4 -4" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="10" y="16" width="44" height="32" rx="6" fill="none" stroke="#2d2a78" stroke-width="1.5" opacity="0.7"/>
+</svg>

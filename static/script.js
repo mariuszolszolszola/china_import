@@ -14,12 +14,14 @@ const state = {
   sheetContainers: [],
   sheetProducts: [],
   productOriginalFiles: [],
+  filterMonth: null,
+  isSyncingFromSheet: false,
 };
 
 /* Elementy DOM */
 const els = {
-  currencyPLNBtn: document.getElementById("currencyPLNBtn"),
-  currencyUSDBtn: document.getElementById("currencyUSDBtn"),
+  currencySelect: document.getElementById("currencySelect"),
+  importFromDriveBtn: document.getElementById("importFromDriveBtn"), filterMonth: document.getElementById("filterMonth"), clearFilterBtn: document.getElementById("clearFilterBtn"),
   toggleContainerFormBtn: document.getElementById("toggleContainerFormBtn"),
   containerFormSection: document.getElementById("containerFormSection"),
   containerFormTitle: document.getElementById("containerFormTitle"),
@@ -78,29 +80,61 @@ const els = {
   // Lista
   refreshBtn: document.getElementById("refreshBtn"),
   containerList: document.getElementById("containerList"),
-};
+
+   // Import modal elements
+   importModal: document.getElementById("importModal"),
+   importTree: document.getElementById("importTree"),
+   importRootId: document.getElementById("importRootId"),
+   importRunBtn: document.getElementById("importRunBtn"),
+   importCloseBtn: document.getElementById("importCloseBtn"),
+  };
 
 /* Narzędzia API */
 async function api(method, url, body) {
-  const opts = {
-    method,
-    headers: { "Content-Type": "application/json" },
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+
+  // Mutacje wymagają Basic Auth (POST/PUT/DELETE); GET pozostaje publiczny zgodnie z backendem
+  const isMutate = String(method).toUpperCase() !== "GET";
+
+  // Helper: zbuduj nagłówek Authorization (bez zapisu lokalnie – wyłącznie w pamięci)
+  const authHeader = () => {
+    try {
+      if (state && state.auth && state.auth.username != null && state.auth.password != null) {
+        return "Basic " + btoa(unescape(encodeURIComponent(String(state.auth.username) + ":" + String(state.auth.password))));
+      }
+    } catch (_) {}
+    return null;
   };
-  if (body !== undefined) {
-    opts.body = JSON.stringify(body);
+
+  // Dołącz Authorization dla mutacji, jeśli mamy poświadczenia w pamięci
+  if (isMutate) {
+    const ah = authHeader();
+    if (ah) opts.headers["Authorization"] = ah;
   }
-  const res = await fetch(url, opts);
+
+  // Wykonaj żądanie
+  let res = await fetch(url, opts);
+
+  // Jeśli 401 przy mutacji – poproś o login/hasło i spróbuj raz jeszcze
+  if (res.status === 401 && isMutate) {
+    const u = prompt("Login (Basic Auth):") || "";
+    const p = prompt("Hasło (Basic Auth):") || "";
+    if (u && p) {
+      state.auth = { username: u, password: p }; // tylko w pamięci
+      const ah2 = authHeader();
+      if (ah2) {
+        opts.headers["Authorization"] = ah2;
+        res = await fetch(url, opts);
+      }
+    }
+  }
+
   if (!res.ok) {
     let msg = "Request failed";
-    try {
-      const data = await res.json();
-      msg = data?.detail || JSON.stringify(data);
-    } catch (_) {
-      // ignore
-    }
+    try { const data = await res.json(); msg = data?.detail || JSON.stringify(data); } catch (_){}
     throw new Error(msg);
   }
-  // No content
   if (res.status === 204) return null;
   return res.json();
 }
@@ -180,6 +214,91 @@ async function loadSheets() {
   }
   fillSheetContainerSelect();
   fillSheetProductSelect();
+}
+
+/* Arkusz → pobierz wiersze kontenerów (bez persystencji) */
+async function getSheetContainers() {
+  try {
+    const cs = await api("GET", "/api/sheets/containers");
+    return Array.isArray(cs) ? cs : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/* Synchronizacja kontenerów z arkusza:
+   - replaceExisting=true: usuń wszystkie istniejące kontenery i zaimportuj z arkusza
+   - replaceExisting=false: tylko zaimportuj, jeśli lista jest pusta (np. na starcie)
+*/
+async function syncContainersFromSheet(replaceExisting = false) {
+  // Straż reentrancyjna – zapobiega jednoczesnym wywołaniom
+  if (state.isSyncingFromSheet) return;
+  state.isSyncingFromSheet = true;
+  try {
+    const sheetRows = await getSheetContainers();
+    if (!sheetRows.length) return;
+
+    if (replaceExisting) {
+      // Upewnij się, że mamy aktualny stan kontenerów przed kasowaniem
+      if (!Array.isArray(state.containers) || state.containers.length === 0) {
+        try { await loadContainers(); } catch (_) {}
+      }
+      const current = Array.isArray(state.containers) ? state.containers : [];
+      for (const c of current) {
+        try { await api("DELETE", `/api/containers/${c.id}`); } catch (_) {}
+      }
+    } else {
+      // Jeśli nie wymuszamy podmiany, a lista nie jest pusta – nie rób duplikacji
+      const current = Array.isArray(state.containers) ? state.containers : [];
+      if (current.length > 0) return;
+    }
+
+    // Utwórz kontenery na podstawie wierszy arkusza
+    for (const rec of sheetRows) {
+      const data = {
+        name: rec.name || "",
+        orderDate: rec.orderDate || "",
+        paymentDate: rec.paymentDate || null,
+        productionDays: rec.productionDays || "",
+        deliveryDate: rec.deliveryDate || null,
+        exchangeRate: rec.exchangeRate || "4.0",
+
+        containerCost: rec.containerCost || "",
+        containerCostCurrency: (rec.containerCostCurrency || "USD").trim(),
+
+        customsClearanceCost: rec.customsClearanceCost || "",
+        customsClearanceCostCurrency: (rec.customsClearanceCostCurrency || "USD").trim(),
+
+        transportChinaCost: rec.transportChinaCost || "",
+        transportChinaCostCurrency: (rec.transportChinaCostCurrency || "USD").trim(),
+
+        transportPolandCost: rec.transportPolandCost || "",
+        transportPolandCostCurrency: (rec.transportPolandCostCurrency || "USD").trim(),
+
+        insuranceCost: rec.insuranceCost || "",
+        insuranceCostCurrency: (rec.insuranceCostCurrency || "USD").trim(),
+
+        totalTransportCbm: rec.totalTransportCbm || "",
+        additionalCosts: rec.additionalCosts || "",
+        additionalCostsCurrency: (rec.additionalCostsCurrency || "USD").trim(),
+
+        pickedUpInChina: !!rec.pickedUpInChina,
+        customsClearanceDone: !!rec.customsClearanceDone,
+        deliveredToWarehouse: !!rec.deliveredToWarehouse,
+        documentsInSystem: !!rec.documentsInSystem,
+      };
+      try {
+        // Oznacz import z arkusza, aby backend mógł pominąć append do Sheets
+        await api("POST", "/api/containers?source=sheet", data);
+      } catch (_) {
+        // pomiń pojedyncze błędy importu
+      }
+    }
+  } catch (_) {
+    // pomiń ogólne błędy sync
+  } finally {
+    state.isSyncingFromSheet = false;
+  }
 }
 
 function calculateProductCosts(product, container) {
@@ -320,7 +439,7 @@ function renderContainersList() {
   const list = els.containerList;
   list.innerHTML = "";
 
-  state.containers.forEach((c) => {
+  (state.filterMonth && typeof state.filterMonth === "string" && state.filterMonth.length === 7 ? state.containers.filter((c) => (((c.orderDate || "").slice(0, 7)) === state.filterMonth)) : state.containers).forEach((c) => {
     const totals = calculateContainerTotals(c);
     const exchangeRate = num(c.exchangeRate, 4.0);
     const statusClass = getStatusClass(c);
@@ -416,10 +535,11 @@ function renderContainersList() {
               <div>Cło: <strong>${convertPrice(costs.dutyAmount, exchangeRate)}</strong></div>
               <div>VAT: <strong>${convertPrice(costs.vatAmount, exchangeRate)}</strong></div>
               <div>Dodatkowe/szt.: <strong>${convertPrice(costs.additionalPerUnit, exchangeRate)}</strong></div>
-              <div>Razem/szt.: <strong>${convertPrice(costs.totalCostPerUnit, exchangeRate)}</strong></div>
+              <div>Netto/szt.: <strong>${convertPrice(costs.pricePerUnit + costs.transportPerUnit + (costs.dutyAmount / costs.quantity) + costs.additionalPerUnit, exchangeRate)}</strong> | Razem/szt.: <strong>${convertPrice(costs.totalCostPerUnit, exchangeRate)}</strong></div>
             </div>
             ${attachmentsHtml}
             <div class="product-actions">
+              <button class="btn" data-action="download-all" data-cid="${c.id}" data-pid="${p.id}">Pobierz pliki</button>
               <button class="btn" data-action="edit-product" data-cid="${c.id}" data-pid="${p.id}">Edytuj</button>
               <button class="btn danger" data-action="delete-product" data-cid="${c.id}" data-pid="${p.id}">Usuń</button>
             </div>
@@ -570,14 +690,125 @@ function resetProductForm() {
 }
 
 /* Zdarzenia globalne */
-els.currencyPLNBtn.addEventListener("click", () => {
-  state.displayCurrency = "PLN";
-  renderContainersList();
-});
-els.currencyUSDBtn.addEventListener("click", () => {
-  state.displayCurrency = "USD";
-  renderContainersList();
-});
+if (els.currencySelect) {
+  els.currencySelect.value = state.displayCurrency || "PLN";
+  els.currencySelect.addEventListener("change", () => {
+    const v = (els.currencySelect.value || "PLN").toUpperCase();
+    state.displayCurrency = v === "USD" ? "USD" : "PLN";
+    renderContainersList();
+  });
+}
+
+// Filtr miesiąca (YYYY-MM)
+if (els.filterMonth) {
+  const savedMonth = localStorage.getItem("filterMonth");
+  if (savedMonth && typeof savedMonth === "string") {
+    state.filterMonth = savedMonth;
+    els.filterMonth.value = savedMonth;
+  }
+  els.filterMonth.addEventListener("change", () => {
+    const v = (els.filterMonth.value || "").trim();
+    state.filterMonth = v || null;
+    if (v) {
+      localStorage.setItem("filterMonth", v);
+    } else {
+      localStorage.removeItem("filterMonth");
+    }
+    renderContainersList();
+  });
+}
+
+if (els.clearFilterBtn) {
+  els.clearFilterBtn.addEventListener("click", () => {
+    if (els.filterMonth) els.filterMonth.value = "";
+    state.filterMonth = null;
+    localStorage.removeItem("filterMonth");
+    renderContainersList();
+  });
+}
+
+/* Produkty – agregacja widoku i akcje */
+function getAllProducts() {
+  const out = [];
+  const containers = Array.isArray(state.containers) ? state.containers : [];
+  for (const c of containers) {
+    const products = Array.isArray(c.products) ? c.products : [];
+    for (const p of products) {
+      out.push({ container: c, product: p });
+    }
+  }
+  return out;
+}
+
+function renderProductsList() {
+  const box = document.getElementById("productsList");
+  if (!box) return;
+  const items = getAllProducts();
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">Brak produktów.</div>';
+    return;
+  }
+  const html = items.map(({ container, product }) => {
+    const cid = String(container.id);
+    const pid = String(product.id);
+    const files = Array.isArray(product.files) ? product.files : [];
+    const filesHtml = files.length
+      ? '<div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">'
+        + files.map(u => `<a href="${u}" download class="btn small" rel="noopener" target="_blank">Plik</a>`).join("")
+        + '</div>'
+      : '<div class="empty">Brak załączników</div>';
+
+    return `
+      <div class="product-row product-card">
+        <div class="product-main">
+          <div class="product-name"><strong>${product.name || "Produkt"}</strong></div>
+          <div class="product-meta">Kontener: ${container.name || ""} · Ilość: ${product.quantity || 0} · Waluta: ${product.totalPriceCurrency || "USD"} · CBM: ${product.productCbm || 0}</div>
+          ${filesHtml}
+        </div>
+        <div class="product-costs">
+          <div>Wartość: ${Number(product.totalPrice || 0)} ${product.totalPriceCurrency || "USD"}</div>
+          <div>% cła: ${product.customsDutyPercent || 0}</div>
+          <div>Załączniki: ${files.length}</div>
+        </div>
+        <div class="product-actions">
+          <button class="btn small" data-action="edit-product" data-cid="${cid}" data-pid="${pid}">Edytuj</button>
+          <button class="btn small" data-action="download-all" data-cid="${cid}" data-pid="${pid}">Pobierz pliki</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+  box.innerHTML = html;
+}
+
+/* Odśwież produkty */
+const refreshProductsBtnEl = document.getElementById("refreshProductsBtn");
+if (refreshProductsBtnEl) {
+  refreshProductsBtnEl.addEventListener("click", async () => {
+    await loadContainers();
+    renderProductsList();
+  });
+}
+
+/* Edycja produktu z widoku produktów */
+const productsListEl = document.getElementById("productsList");
+if (productsListEl) {
+  productsListEl.addEventListener("click", async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const action = target.getAttribute("data-action");
+    if (action !== "edit-product") return;
+    const cid = parseInt(target.getAttribute("data-cid"), 10);
+    const pid = parseInt(target.getAttribute("data-pid"), 10);
+    const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
+    const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+    if (!c || !p) return;
+    state.editingProductId = pid;
+    populateProductForm(cid, p);
+    state.showProductForm = true;
+    els.productFormSection.classList.remove("hidden");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
 
 els.toggleContainerFormBtn.addEventListener("click", () => {
   state.showContainerForm = !state.showContainerForm;
@@ -668,7 +899,30 @@ async function uploadProductFiles(productName, files) {
     form.append("productName", productName || "product");
     form.append("file", f);
     try {
-      const res = await fetch("/api/files/upload", { method: "POST", body: form });
+      const opts = { method: "POST", body: form, headers: {} };
+
+      // Dołącz Basic Auth jeśli dostępne (bez zapisu lokalnego – tylko w pamięci)
+      try {
+        if (state && state.auth && state.auth.username != null && state.auth.password != null) {
+          opts.headers["Authorization"] = "Basic " + btoa(unescape(encodeURIComponent(String(state.auth.username) + ":" + String(state.auth.password))));
+        }
+      } catch (_) {}
+
+      let res = await fetch("/api/files/upload", opts);
+
+      // Jeśli 401 – poproś o login/hasło i spróbuj ponownie
+      if (res.status === 401) {
+        const u = prompt("Login (Basic Auth):") || "";
+        const p = prompt("Hasło (Basic Auth):") || "";
+        if (u && p) {
+          state.auth = { username: u, password: p }; // przechowywane wyłącznie w pamięci
+          try {
+            opts.headers["Authorization"] = "Basic " + btoa(unescape(encodeURIComponent(String(u) + ":" + String(p))));
+          } catch (_) {}
+          res = await fetch("/api/files/upload", opts);
+        }
+      }
+
       if (!res.ok) throw new Error("Upload failed");
       const json = await res.json();
       if (json && json.url) urls.push(json.url);
@@ -677,6 +931,26 @@ async function uploadProductFiles(productName, files) {
     }
   }
   return urls;
+}
+
+/* Pobierz wszystkie załączniki produktu – sekwencyjnie otwiera linki (może otwierać nowe karty) */
+async function downloadAllAttachments(urls) {
+  const list = Array.isArray(urls) ? urls : [];
+  for (const u of list) {
+    try {
+      const a = document.createElement("a");
+      a.href = String(u);
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      await new Promise((r) => setTimeout(r, 250));
+    } catch (_) {
+      // ignore pojedyncze błędy
+    }
+  }
 }
 
 if (els.pFiles) {
@@ -816,8 +1090,13 @@ if (els.loadProductFromSheetBtn) {
   });
 }
 
-els.refreshBtn.addEventListener("click", () => {
-  loadContainers();
+els.refreshBtn.addEventListener("click", async () => {
+  // Najpierw upewnij się, że stan jest aktualny
+  await loadContainers();
+  // Następnie wymuś pełną synchronizację (replace)
+  await syncContainersFromSheet(true);
+  // Na końcu odśwież widok
+  await loadContainers();
 });
 
 /* Zdarzenia na liście (delegacja) */
@@ -896,7 +1175,7 @@ els.containerList.addEventListener("change", async (ev) => {
   }
 });
 
-// Wersja aplikacji – pobierz short SHA i pokaż w badge
+/* Wersja aplikacji – pobierz label i short SHA, pokaż w badge */
 async function updateVersionBadge() {
   const el = document.getElementById("versionBadge");
   if (!el) return;
@@ -905,19 +1184,48 @@ async function updateVersionBadge() {
     if (!res.ok) throw new Error("version fetch failed");
     const data = await res.json();
     const sha = String(data?.shortSha || data?.version || "").trim();
-    el.textContent = sha || "local";
+    const hasBuild = data && data.buildNumber !== undefined && data.buildNumber !== null && !Number.isNaN(Number(data.buildNumber));
+    const label = String(data?.versionLabel || "").trim();
+    const text = label || (sha ? `Version ${sha}${hasBuild ? ` (build ${Number(data.buildNumber)})` : ""}` : "Version local");
+    el.textContent = text;
     if (data?.env) el.title = "Wersja aplikacji (" + String(data.env) + ")";
     el.classList.remove("hidden");
   } catch (_) {
-    el.textContent = "local";
+    el.textContent = "Version local";
     el.classList.remove("hidden");
   }
 }
 /* Inicjalizacja */
-window.addEventListener("DOMContentLoaded", () => {
-  loadSheets();
-  loadContainers();
+window.addEventListener("DOMContentLoaded", async () => {
+  await loadSheets();
+  await loadContainers();
+  renderProductsList();
+  // Gdy pusto na starcie – automatyczny import z arkusza
+  if (!Array.isArray(state.containers) || state.containers.length === 0) {
+    await syncContainersFromSheet(false);
+    await loadContainers();
+    renderProductsList();
+  }
 });
+
+/* Download all attachments (delegacja na cały dokument) */
+document.addEventListener("click", async (ev) => {
+  const target = ev.target;
+  if (!(target instanceof HTMLElement)) return;
+  const action = target.getAttribute("data-action");
+  if (action !== "download-all") return;
+  const cid = parseInt(target.getAttribute("data-cid") || "0", 10);
+  const pid = parseInt(target.getAttribute("data-pid") || "0", 10);
+  const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
+  const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+  const urls = Array.isArray(p?.files) ? p.files : [];
+  if (!urls.length) {
+    alert("Brak załączników do pobrania.");
+    return;
+  }
+  await downloadAllAttachments(urls);
+});
+
 // Auto-init wersji w prawym górnym rogu
 window.addEventListener("DOMContentLoaded", () => {
   if (typeof updateVersionBadge === "function") {

@@ -422,18 +422,49 @@ def _basic_auth_enabled() -> bool:
     _load_env_from_file()
     return bool(os.environ.get("BASIC_AUTH_USERNAME")) and bool(os.environ.get("BASIC_AUTH_PASSWORD"))
 
-def _basic_auth_skip_path(path: str) -> bool:
-    exclude = {"/api/oauth/callback", "/api/oauth/url", "/api/health", "/api/version"}
+def _basic_auth_skip(request: Request) -> bool:
+    """
+    Zasada:
+    - Zawsze publiczne: "/", statyki, /api/version, /api/health oraz wpisy z BASIC_AUTH_EXCLUDE.
+    - Publiczne wyłącznie dla GET: /api/containers, /api/sheets/containers, /api/sheets/products.
+    - Wszystkie mutacje (POST/PUT/DELETE) wymagają Basic Auth.
+    """
+    path = request.url.path
+    method = str(getattr(request, "method", "GET")).upper()
+
+    # Dokładne wykluczenia (zawsze publiczne)
+    excludes_exact = {"/", "/api/health", "/api/version", "/api/oauth/callback", "/api/oauth/url"}
+    # Prefiksowe wykluczenia (zawsze publiczne)
+    excludes_prefix = ["/static"]
+
+    # GET-only public API dla UI
+    if method == "GET":
+        excludes_prefix += ["/api/containers", "/api/sheets/containers", "/api/sheets/products"]
+
+    # Dodatkowe wykluczenia z .env (BASIC_AUTH_EXCLUDE)
+    # - wpisy zakończone "*" traktujemy jako prefiks
+    # - pozostałe jako dopasowanie dokładne
     extra = os.environ.get("BASIC_AUTH_EXCLUDE", "")
     for p in [s.strip() for s in extra.split(",") if s.strip()]:
-        exclude.add(p)
-    return path in exclude
+        if p.endswith("*"):
+            excludes_prefix.append(p[:-1])
+        else:
+            excludes_exact.add(p)
+
+    if path in excludes_exact:
+        return True
+    for pref in excludes_prefix:
+        if path.startswith(pref):
+            return True
+    return False
 
 @app.middleware("http")
 async def _basic_auth_middleware(request: Request, call_next):
     try:
-        if _basic_auth_skip_path(request.url.path) or not _basic_auth_enabled():
+        # Jeśli Basic Auth niewłączone lub dany request powinien być publiczny → przepuść
+        if not _basic_auth_enabled() or _basic_auth_skip(request):
             return await call_next(request)
+
         auth = request.headers.get("Authorization")
         if not auth or not auth.startswith("Basic "):
             return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Restricted"'})
@@ -455,15 +486,32 @@ async def _basic_auth_middleware(request: Request, call_next):
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
 
-# Endpoint wersji – zwraca short SHA commita i środowisko
+# Endpoint wersji – short SHA + opcjonalny buildNumber
 @app.get("/api/version")
 def api_version() -> Dict[str, Any]:
     _load_env_from_file()
     sha = _get_short_sha()
     env = os.environ.get("VERCEL_ENV") or ("production" if os.environ.get("VERCEL") else "development")
+
+    # Opcjonalny numer builda z env (np. z CI/CD): APP_BUILD_NUMBER / COMMIT_COUNT / BUILD_NUMBER
+    build_env = (
+        os.environ.get("APP_BUILD_NUMBER")
+        or os.environ.get("COMMIT_COUNT")
+        or os.environ.get("BUILD_NUMBER")
+    )
+    build_number: Optional[int] = None
+    if build_env:
+        try:
+            build_number = int(str(build_env).strip())
+        except Exception:
+            build_number = None
+
+    version_label = f"Version {sha or 'local'}" + (f" (build {build_number})" if build_number is not None else "")
     return {
         "version": sha or "local",
         "shortSha": sha or None,
+        "buildNumber": build_number,
+        "versionLabel": version_label,
         "env": env,
         "serverTime": datetime.utcnow().isoformat() + "Z",
     }
@@ -697,15 +745,18 @@ def list_containers() -> List[Container]:
     return data
 
 @app.post("/api/containers", status_code=201)
-def create_container(payload: ContainerIn) -> Container:
+def create_container(payload: ContainerIn, request: Request) -> Container:
     c = Container(**payload.dict())
     c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
     data = _load_data()
     data.append(c.dict())
     _save_data(data)
     # zapis do Google Sheets (append); ignoruj błędy
+    # jeżeli import z arkusza (source=sheet) – pomiń append, aby nie duplikować wierszy
     try:
-        _on_created_container_sync_to_sheet(c.dict())
+        src = (request.query_params.get("source") or "").strip().lower()
+        if src != "sheet":
+            _on_created_container_sync_to_sheet(c.dict())
     except Exception:
         pass
     return c.dict()
@@ -901,3 +952,248 @@ def index():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+# --- Google Drive scan/import helpers & endpoints ---
+
+def _drive_build_service():
+    """Zbuduj klienta Google Drive z OAuth użytkownika."""
+    _load_env_from_file()
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
+    token_uri = os.environ.get("OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token")
+    if not client_id or not client_secret or not refresh_token:
+        raise HTTPException(status_code=500, detail="Brak konfiguracji OAuth (wymagane: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN)")
+    try:
+        from google.oauth2.credentials import Credentials  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
+        from googleapiclient.discovery import build  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Biblioteki Google API niedostępne: {e}")
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri=token_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=DRIVE_SCOPES,
+    )
+    try:
+        creds.refresh(Request())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OAuth refresh failed: {e}")
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return service
+
+
+def _drive_resolve_root_id(service, env_root_id: Optional[str], file_id_sheet: Optional[str]) -> str:
+    """Ustal folder root zgodnie z FOLDER_ID/FILE_ID, z fallback do 'root'."""
+    root_id = env_root_id
+    try:
+        if not root_id or str(root_id).lower() == "root":
+            if file_id_sheet:
+                meta = service.files().get(fileId=file_id_sheet, fields="id,mimeType,parents").execute()
+                mime = meta.get("mimeType")
+                parents = meta.get("parents", []) or []
+                if mime == "application/vnd.google-apps.folder":
+                    root_id = file_id_sheet
+                else:
+                    if parents:
+                        root_id = parents[0]
+    except Exception as re_err:
+        print(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
+    if not root_id:
+        root_id = "root"
+    try:
+        if root_id and str(root_id).lower() != "root":
+            service.files().get(fileId=root_id, fields="id").execute()
+    except Exception as ge:
+        print(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
+        root_id = "root"
+    return root_id
+
+
+def _drive_list_folders(service, parent_id: str):
+    """Zwróć listę podfolderów w danym folderze."""
+    q = f"mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
+    resp = service.files().list(q=q, fields="files(id,name,mimeType,parents,webViewLink)", pageSize=1000).execute()
+    return resp.get("files", []) or []
+
+
+def _drive_list_files(service, parent_id: str):
+    """Zwróć listę plików (nie-folderów) w danym folderze."""
+    q = f"mimeType!='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
+    resp = service.files().list(q=q, fields="files(id,name,mimeType,parents,webViewLink,webContentLink)", pageSize=1000).execute()
+    return resp.get("files", []) or []
+
+
+def _drive_download_url(file_id: Optional[str], web_content: Optional[str], web_view: Optional[str]) -> str:
+    """Zbuduj URL do pobrania pliku."""
+    if web_content:
+        return web_content
+    if file_id:
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return web_view or ""
+
+
+@app.get("/api/drive/scan")
+def drive_scan(rootId: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Skanuj strukturę folderów w Google Drive:
+    - root → kontener → produkt → pliki
+    Zwraca drzewo do importu produktów z załącznikami.
+    """
+    _load_env_from_file()
+    service = _drive_build_service()
+    env_root_id = rootId or os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
+    file_id_sheet = os.environ.get("FILE_ID")
+    root_id = _drive_resolve_root_id(service, env_root_id, file_id_sheet)
+
+    out_containers: List[Dict[str, Any]] = []
+    for cf in _drive_list_folders(service, root_id):
+        c_entry: Dict[str, Any] = {"id": cf.get("id"), "name": cf.get("name"), "products": []}
+        for pf in _drive_list_folders(service, cf.get("id")):
+            files = []
+            for f in _drive_list_files(service, pf.get("id")):
+                files.append({
+                    "id": f.get("id"),
+                    "name": f.get("name"),
+                    "url": _drive_download_url(f.get("id"), f.get("webContentLink"), f.get("webViewLink")),
+                    "mimeType": f.get("mimeType"),
+                })
+            c_entry["products"].append({"id": pf.get("id"), "name": pf.get("name"), "files": files})
+        out_containers.append(c_entry)
+
+    return {"rootId": root_id, "containers": out_containers}
+
+
+class DriveImportRequest(BaseModel):
+    """Żądanie importu z Google Drive."""
+    containerIds: List[str] = Field(default_factory=list)
+    productIds: List[str] = Field(default_factory=list)
+    rootId: Optional[str] = None
+
+
+@app.post("/api/containers/import/drive")
+def import_from_drive(req: DriveImportRequest) -> Dict[str, Any]:
+    """
+    Importuj kontenery/produkty z Google Drive:
+    - jeśli podano containerIds: import produktów (folderów) i plików z tych kontenerów
+    - jeśli podano productIds: import pojedynczych produktów (folderów) i ich plików
+    Import trafia WYŁĄCZNIE do magazynu in‑memory; brak zapisu lokalnie. Opcjonalnie append do Google Sheets.
+    """
+    _load_env_from_file()
+    service = _drive_build_service()
+    file_id_sheet = os.environ.get("FILE_ID")
+    env_root_id = req.rootId or os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
+    root_id = _drive_resolve_root_id(service, env_root_id, file_id_sheet)
+
+    data = _load_data()
+
+    def find_container_index_by_name(name: str) -> int:
+        for i, item in enumerate(data):
+            if str(item.get("name", "")).strip() == str(name).strip():
+                return i
+        return -1
+
+    imported_containers = 0
+    imported_products = 0
+
+    # Import z kontenerów (folderów)
+    for container_folder_id in (req.containerIds or []):
+        cmeta = service.files().get(fileId=container_folder_id, fields="id,name").execute()
+        cname = cmeta.get("name") or "Kontener"
+        idx = find_container_index_by_name(cname)
+        if idx < 0:
+            c = Container(name=cname, orderDate="", productionDays="0", exchangeRate="4.0")
+            c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
+            c_dict = c.dict()
+            data.append(c_dict)
+            imported_containers += 1
+            try:
+                _on_created_container_sync_to_sheet(c_dict)
+            except Exception:
+                pass
+            idx = len(data) - 1
+
+        # Produkty (foldery) wewnątrz kontenera
+        for pf in _drive_list_folders(service, container_folder_id):
+            pname = pf.get("name") or "Produkt"
+            products = data[idx].get("products", [])
+            p_found_index = next((j for j, p in enumerate(products) if str(p.get("name", "")).strip() == str(pname).strip()), -1)
+
+            files_urls: List[str] = []
+            for f in _drive_list_files(service, pf.get("id")):
+                files_urls.append(_drive_download_url(f.get("id"), f.get("webContentLink"), f.get("webViewLink")))
+
+            if p_found_index < 0:
+                p = Product(name=pname, quantity="1", totalPrice="0", totalPriceCurrency="USD", productCbm="", customsDutyPercent="")
+                p_dict = p.dict()
+                p_dict["files"] = files_urls
+                products.append(p_dict)
+                data[idx]["products"] = products
+                imported_products += 1
+                try:
+                    _on_added_product_sync_to_sheet(data[idx], p_dict)
+                except Exception:
+                    pass
+            else:
+                # scal załączniki bez duplikatów
+                existing = products[p_found_index]
+                existing_files = existing.get("files", []) or []
+                merged = list(existing_files) + [u for u in files_urls if u not in existing_files]
+                existing["files"] = merged
+                data[idx]["products"] = products
+
+    # Import z pojedynczych produktów (folderów)
+    for product_folder_id in (req.productIds or []):
+        pmeta = service.files().get(fileId=product_folder_id, fields="id,name,parents").execute()
+        parent_ids = pmeta.get("parents", []) or []
+        if not parent_ids:
+            continue
+        container_folder_id = parent_ids[0]
+        cmeta = service.files().get(fileId=container_folder_id, fields="id,name").execute()
+        cname = cmeta.get("name") or "Kontener"
+        idx = find_container_index_by_name(cname)
+        if idx < 0:
+            c = Container(name=cname, orderDate="", productionDays="0", exchangeRate="4.0")
+            c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
+            c_dict = c.dict()
+            data.append(c_dict)
+            imported_containers += 1
+            try:
+                _on_created_container_sync_to_sheet(c_dict)
+            except Exception:
+                pass
+            idx = len(data) - 1
+
+        pname = pmeta.get("name") or "Produkt"
+        products = data[idx].get("products", [])
+        p_found_index = next((j for j, p in enumerate(products) if str(p.get("name", "")).strip() == str(pname).strip()), -1)
+
+        files_urls: List[str] = []
+        for f in _drive_list_files(service, product_folder_id):
+            files_urls.append(_drive_download_url(f.get("id"), f.get("webContentLink"), f.get("webViewLink")))
+
+        if p_found_index < 0:
+            p = Product(name=pname, quantity="1", totalPrice="0", totalPriceCurrency="USD", productCbm="", customsDutyPercent="")
+            p_dict = p.dict()
+            p_dict["files"] = files_urls
+            products.append(p_dict)
+            data[idx]["products"] = products
+            imported_products += 1
+            try:
+                _on_added_product_sync_to_sheet(data[idx], p_dict)
+            except Exception:
+                pass
+        else:
+            existing = products[p_found_index]
+            existing_files = existing.get("files", []) or []
+            merged = list(existing_files) + [u for u in files_urls if u not in existing_files]
+            existing["files"] = merged
+            data[idx]["products"] = products
+
+    _save_data(data)
+    return {
+        "imported": {"containers": imported_containers, "products": imported_products},
+        "rootId": root_id,
+    }

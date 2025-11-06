@@ -5,6 +5,8 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Zarządzanie Importem z Chin</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#4f46e5">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -15,10 +17,6 @@
         <p class="subtitle">System śledzenia kontenerów i produktów</p>
       </div>
       <div class="header-right">
-        <div class="btn-group">
-          <button id="currencyPLNBtn" class="btn">PLN</button>
-          <button id="currencyUSDBtn" class="btn">USD</button>
-        </div>
         <button id="toggleContainerFormBtn" class="btn primary">Dodaj Kontener</button>
       </div>
     </header>
@@ -225,7 +223,7 @@
       <div class="form-group">
         <label for="pFiles">Pliki (opcjonalnie)</label>
         <input type="file" id="pFiles" multiple>
-        <small>Pliki zostaną zapisane w folderze o nazwie produktu przy zapisie.</small>
+        <small>Pliki są przesyłane wyłącznie na Google Drive do folderu o nazwie produktu; lokalnie nie zapisujemy żadnych plików.</small>
         <div id="pFilesPreview" class="files-preview"></div>
       </div>
 
@@ -239,38 +237,58 @@
       <div class="list-header">
         <h2>Kontenery</h2>
         <div class="btn-group">
+          <label for="currencySelect" style="display:none">Waluta</label>
+          <select id="currencySelect" class="btn small" style="min-width:80px">
+            <option value="PLN">PLN</option>
+            <option value="USD">USD</option>
+          </select>
+          <input type="month" id="filterMonth" class="btn small" style="min-width:140px" aria-label="Filtr miesiąca (YYYY-MM)">
+          <button id="clearFilterBtn" class="btn small" title="Wyczyść filtr">Wyczyść</button>
           <button id="toggleProductFormBtn" class="btn">Dodaj Produkt</button>
           <button id="refreshBtn" class="btn">Odśwież</button>
         </div>
       </div>
+
+      <!-- Profesjonalna, kompaktowa belka legendy statusów -->
+      <div id="legendBar" class="legend-bar" role="list" aria-label="Legenda statusów">
+        <div class="legend-item" role="listitem">
+          <span class="legend-swatch swatch-green" aria-hidden="true"></span>
+          <span class="legend-label">Dokumenty w księgowości</span>
+        </div>
+        <div class="legend-item" role="listitem">
+          <span class="legend-swatch swatch-green-yellow" aria-hidden="true"></span>
+          <span class="legend-label">Dostarczono do magazynu</span>
+        </div>
+        <div class="legend-item" role="listitem">
+          <span class="legend-swatch swatch-purple" aria-hidden="true"></span>
+          <span class="legend-label">Odprawa celna opłacona</span>
+        </div>
+        <div class="legend-item" role="listitem">
+          <span class="legend-swatch swatch-gray" aria-hidden="true"></span>
+          <span class="legend-label">Odebrano w Chinach</span>
+        </div>
+      </div>
+
       <div id="containerList" class="container-list">
         <!-- renderowane dynamicznie -->
       </div>
     </section>
 
-    <section class="card" id="legendSection">
-      <h3>Legenda kolorów</h3>
-      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div style="width:18px; height:18px; border-radius:4px; background: var(--green-bg); border-left: 6px solid var(--green-border);"></div>
-          <span>Dokumenty w księgowości</span>
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div style="width:18px; height:18px; border-radius:4px; background: linear-gradient(90deg, var(--green-yellow-start), var(--green-yellow-end)); border-left: 6px solid var(--green-border);"></div>
-          <span>Dostarczono do magazynu</span>
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div style="width:18px; height:18px; border-radius:4px; background: var(--purple-bg); border-left: 6px solid var(--purple-border);"></div>
-          <span>Odprawa celna opłacona</span>
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div style="width:18px; height:18px; border-radius:4px; background: var(--gray-bg); border-left: 6px solid var(--gray-border);"></div>
-          <span>Odebrano w Chinach</span>
-        </div>
-      </div>
-    </section>
+
   </div>
 
+    <!-- Sekcja produktów (agregacja ze wszystkich kontenerów) -->
+    <section class="card">
+      <div class="list-header">
+        <h2>Produkty</h2>
+        <div class="btn-group">
+          <button id="refreshProductsBtn" class="btn">Odśwież produkty</button>
+        </div>
+      </div>
+      <div id="productsList" class="product-list">
+        <!-- renderowane dynamicznie -->
+      </div>
+    </section>
     <div id="versionBadge" class="version-badge hidden" title="Wersja aplikacji"></div>
   <script defer src="/static/script.js"></script>
 </body>
