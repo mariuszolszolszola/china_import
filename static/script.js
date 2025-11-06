@@ -16,6 +16,7 @@ const state = {
   productOriginalFiles: [],
   filterMonth: null,
   isSyncingFromSheet: false,
+  isSyncingProducts: false,
 };
 
 /* Elementy DOM */
@@ -226,6 +227,16 @@ async function getSheetContainers() {
   }
 }
 
+/* Arkusz → pobierz wiersze produktów (bez persystencji) */
+async function getSheetProducts() {
+  try {
+    const ps = await api("GET", "/api/sheets/products");
+    return Array.isArray(ps) ? ps : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 /* Synchronizacja kontenerów z arkusza:
    - replaceExisting=true: usuń wszystkie istniejące kontenery i zaimportuj z arkusza
    - replaceExisting=false: tylko zaimportuj, jeśli lista jest pusta (np. na starcie)
@@ -298,6 +309,76 @@ async function syncContainersFromSheet(replaceExisting = false) {
     // pomiń ogólne błędy sync
   } finally {
     state.isSyncingFromSheet = false;
+  }
+}
+
+/* Synchronizacja produktów z arkusza:
+   - replaceExisting=true: usuń wszystkie istniejące produkty i zaimportuj z arkusza
+   - replaceExisting=false: zaimportuj tylko, jeśli w kontenerach nie ma żadnych produktów
+*/
+async function syncProductsFromSheet(replaceExisting = false) {
+  if (state.isSyncingProducts) return;
+  state.isSyncingProducts = true;
+  try {
+    // Upewnij się, że mamy kontenery
+    if (!Array.isArray(state.containers) || state.containers.length === 0) {
+      try { await loadContainers(); } catch (_) {}
+    }
+
+    const sheetRows = await getSheetProducts();
+    if (!sheetRows.length) return;
+
+    // Jeśli nie wymuszamy podmiany, a istnieją już produkty – nie duplikuj
+    const anyProducts = (Array.isArray(state.containers) ? state.containers : [])
+      .some(c => Array.isArray(c.products) && c.products.length > 0);
+    if (!replaceExisting && anyProducts) return;
+
+    // Czyszczenie istniejących produktów (replace)
+    if (replaceExisting) {
+      const current = Array.isArray(state.containers) ? state.containers : [];
+      for (const c of current) {
+        const products = Array.isArray(c.products) ? c.products : [];
+        for (const p of products) {
+          try { await api("DELETE", `/api/containers/${c.id}/products/${p.id}`); } catch (_) {}
+        }
+      }
+      try { await loadContainers(); } catch (_) {}
+    }
+
+    const containers = Array.isArray(state.containers) ? state.containers.slice() : [];
+    const byId = new Map(containers.map(c => [parseInt(c.id, 10), c]));
+    const byName = new Map(containers.map(c => [String(c.name || "").trim().toLowerCase(), c]));
+
+    for (const rec of sheetRows) {
+      const cid = rec.containerId != null ? parseInt(rec.containerId, 10) : NaN;
+      const cname = String(rec.containerName || "").trim().toLowerCase();
+      let container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
+      if (!container) {
+        // Fallback: przypisz produkt do pierwszego dostępnego kontenera
+        container = containers[0];
+        if (!container) continue;
+      }
+    
+      const data = {
+        name: rec.name || "",
+        quantity: rec.quantity || "",
+        totalPrice: rec.totalPrice || "",
+        totalPriceCurrency: (rec.totalPriceCurrency || "USD").trim(),
+        productCbm: rec.productCbm || "",
+        customsDutyPercent: rec.customsDutyPercent || "",
+        files: [],
+      };
+      try {
+        // Oznacz import z arkusza, aby backend mógł pominąć append do Sheets
+        await api("POST", `/api/containers/${container.id}/products?source=sheet`, data);
+      } catch (_) {
+        // pomiń pojedyncze błędy importu
+      }
+    }
+  } catch (_) {
+    // pomiń ogólne błędy
+  } finally {
+    state.isSyncingProducts = false;
   }
 }
 
@@ -784,7 +865,13 @@ function renderProductsList() {
 const refreshProductsBtnEl = document.getElementById("refreshProductsBtn");
 if (refreshProductsBtnEl) {
   refreshProductsBtnEl.addEventListener("click", async () => {
+    // Załaduj aktualne kontenery
     await loadContainers();
+    // Wymuś pełną synchronizację produktów z arkusza
+    await syncProductsFromSheet(true);
+    // Ponownie załaduj kontenery z nowymi produktami
+    await loadContainers();
+    // Przerysuj listę produktów (kafelki)
     renderProductsList();
   });
 }
@@ -1093,10 +1180,17 @@ if (els.loadProductFromSheetBtn) {
 els.refreshBtn.addEventListener("click", async () => {
   // Najpierw upewnij się, że stan jest aktualny
   await loadContainers();
-  // Następnie wymuś pełną synchronizację (replace)
+
+  // Następnie wymuś pełną synchronizację (replace) kontenerów
   await syncContainersFromSheet(true);
-  // Na końcu odśwież widok
   await loadContainers();
+
+  // Teraz wymuś pełną synchronizację (replace) produktów
+  await syncProductsFromSheet(true);
+
+  // Na końcu odśwież widok i dane
+  await loadContainers();
+  renderProductsList();
 });
 
 /* Zdarzenia na liście (delegacja) */
@@ -1200,12 +1294,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   await loadSheets();
   await loadContainers();
   renderProductsList();
-  // Gdy pusto na starcie – automatyczny import z arkusza
+
+  // Gdy pusto na starcie – automatyczny import z arkusza (kontenery)
   if (!Array.isArray(state.containers) || state.containers.length === 0) {
     await syncContainersFromSheet(false);
     await loadContainers();
-    renderProductsList();
   }
+
+  // Następnie spróbuj zaimportować produkty z arkusza (bez duplikacji)
+  await syncProductsFromSheet(false);
+  await loadContainers();
+  renderProductsList();
 });
 
 /* Download all attachments (delegacja na cały dokument) */

@@ -218,6 +218,34 @@ def _map_sheet_container(rec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mapuj rekord produktu z arkusza, tolerując różne nazwy kolumn:
+    - ID kontenera: containerId, container_id, cid, idContainer, kontenerId, id_kontenera
+    - Nazwa kontenera: containerName, container, kontener, container_title, container_name, nazwa_kontenera
+    """
+    # ID kontenera (toleruj różne nagłówki)
+    cid_raw = rec.get("containerId")
+    if cid_raw in (None, ""):
+        for key in ("container_id", "cid", "idContainer", "kontenerId", "id_kontenera"):
+            v = rec.get(key)
+            if v not in (None, ""):
+                cid_raw = v
+                break
+    try:
+        cid = int(str(cid_raw).strip()) if cid_raw not in (None, "") else None
+    except Exception:
+        cid = None
+
+    # Nazwa kontenera (toleruj różne nagłówki)
+    cname_raw = rec.get("containerName")
+    if not cname_raw:
+        for key in ("container", "kontener", "container_title", "container_name", "nazwa_kontenera"):
+            v = rec.get(key)
+            if v:
+                cname_raw = v
+                break
+    cname = str(cname_raw or "").strip()
+
     return {
         "name": str(rec.get("name", "")).strip(),
         "quantity": str(rec.get("quantity", "")).strip(),
@@ -225,6 +253,8 @@ def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
         "totalPriceCurrency": str(rec.get("totalPriceCurrency", "USD")).strip() or "USD",
         "productCbm": str(rec.get("productCbm", "")).strip(),
         "customsDutyPercent": str(rec.get("customsDutyPercent", "")).strip(),
+        "containerId": cid,
+        "containerName": cname,
     }
 
 # Domyślne nagłówki w arkuszach
@@ -406,6 +436,71 @@ class ContainerUpdate(BaseModel):
 
 app = FastAPI(title="Import Tracker API", version="0.1.0")
 
+# Auto-import z arkusza przy starcie aplikacji:
+# - Jeśli brak kontenerów w pamięci → importuj kontenery z arkusza
+# - Jeśli brak produktów → importuj produkty i przypisz do kontenerów po nazwie (fallback: pierwszy kontener)
+@app.on_event("startup")
+def _auto_import_from_sheets_on_start() -> None:
+    try:
+        data = _load_data()
+        # Import kontenerów gdy brak danych
+        if not data:
+            cs = sheet_containers()
+            new_data: List[Dict[str, Any]] = []
+            for rec in cs:
+                try:
+                    c = Container(**rec).dict()
+                except Exception:
+                    # Fallback przez ContainerIn
+                    try:
+                        c = Container(**ContainerIn(**rec).dict()).dict()
+                    except Exception:
+                        continue
+                # pickupDate wyliczane lokalnie
+                c["pickupDate"] = _calc_pickup_date(c.get("orderDate"), c.get("productionDays"))
+                new_data.append(c)
+            if new_data:
+                _save_data(new_data)
+                data = _load_data()
+
+        # Import produktów jeśli żaden kontener nie ma produktów
+        any_products = any((c.get("products") or []) for c in data)
+        if not any_products and data:
+            ps = sheet_products()
+            if ps:
+                by_name: Dict[str, Dict[str, Any]] = {
+                    str(c.get("name", "")).strip().lower(): c for c in data
+                }
+                for rec in ps:
+                    cname = str(rec.get("containerName", "")).strip().lower()
+                    container = by_name.get(cname) if cname else (data[0] if data else None)
+                    if not container:
+                        continue
+                    # Zbuduj payload produktu z tolerancją braków
+                    payload = {
+                        "name": str(rec.get("name", "")).strip(),
+                        "quantity": str(rec.get("quantity", "")).strip(),
+                        "totalPrice": str(rec.get("totalPrice", "")).strip(),
+                        "totalPriceCurrency": str(rec.get("totalPriceCurrency", "USD")).strip() or "USD",
+                        "productCbm": str(rec.get("productCbm", "")).strip(),
+                        "customsDutyPercent": str(rec.get("customsDutyPercent", "")).strip(),
+                        "files": [],
+                    }
+                    try:
+                        p = Product(**payload).dict()
+                    except Exception:
+                        # W skrajnych przypadkach akceptuj bez pydantic (minimalny rekord)
+                        p = {"id": _next_id(), **payload}
+                    products = container.get("products", [])
+                    products.append(p)
+                    container["products"] = products
+                _save_data(data)
+    except Exception as e:
+        try:
+            print(f"[Startup] Auto import from sheets failed: {e}")
+        except Exception:
+            pass
+
 # CORS – w razie potrzeby (gdyby statyki były serwowane z innego hosta)
 app.add_middleware(
     CORSMiddleware,
@@ -427,10 +522,19 @@ def _basic_auth_skip(request: Request) -> bool:
     Zasada:
     - Zawsze publiczne: "/", statyki, /api/version, /api/health oraz wpisy z BASIC_AUTH_EXCLUDE.
     - Publiczne wyłącznie dla GET: /api/containers, /api/sheets/containers, /api/sheets/products.
-    - Wszystkie mutacje (POST/PUT/DELETE) wymagają Basic Auth.
+    - Mutacje (POST/PUT/DELETE) wymagają Basic Auth, z wyjątkiem importu z arkusza (source=sheet) na endpointach kontenerów/produktów.
     """
     path = request.url.path
     method = str(getattr(request, "method", "GET")).upper()
+
+    # Import z arkusza (source=sheet) – przepuść mutacje bez auth dla UI automatycznego importu
+    try:
+        src = (request.query_params.get("source") or "").strip().lower()
+    except Exception:
+        src = ""
+    if src == "sheet" and method in ("POST", "PUT", "DELETE"):
+        if path.startswith("/api/containers"):
+            return True
 
     # Dokładne wykluczenia (zawsze publiczne)
     excludes_exact = {"/", "/api/health", "/api/version", "/api/oauth/callback", "/api/oauth/url"}
@@ -870,7 +974,7 @@ def delete_container(container_id: int):
     return
 
 @app.post("/api/containers/{container_id}/products", status_code=201)
-def add_product(container_id: int, payload: ProductIn) -> Product:
+def add_product(container_id: int, payload: ProductIn, request: Request) -> Product:
     data = _load_data()
     for i, item in enumerate(data):
         if int(item.get("id")) == container_id:
@@ -882,7 +986,9 @@ def add_product(container_id: int, payload: ProductIn) -> Product:
             _save_data(data)
             # zapis do Google Sheets (append); ignoruj błędy
             try:
-                _on_added_product_sync_to_sheet(item, p.dict())
+                src = (request.query_params.get("source") or "").strip().lower()
+                if src != "sheet":
+                    _on_added_product_sync_to_sheet(item, p.dict())
             except Exception:
                 pass
             return p.dict()
