@@ -48,6 +48,15 @@ body {
   padding: 24px;
 }
 
+/* Dopasowanie szerokości sekcji produktów do kontenera .page,
+   gdy sekcja produktów jest renderowana poza .page */
+.page + section.card {
+  /* ta sama szerokość wizualna jak karta w .page (uwzględnia 24px padding po obu stronach) */
+  width: calc(100% - 48px);
+  max-width: calc(1200px - 48px);
+  margin: 0 auto;
+}
+
 .card {
   background: #fff;
   border: 1px solid var(--border);
@@ -379,9 +388,10 @@ body {
 
 /* Widok "Produkty" – agregacja ze wszystkich kontenerów */
 .product-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
   margin-top: 14px;
 }
 
@@ -393,6 +403,7 @@ body {
   background: rgba(255, 255, 255, 0.6);
   border: 1px solid var(--border);
   border-radius: 10px;
+  grid-template-columns: 1fr;
 }
 
 .product-list .product-main .product-name {
