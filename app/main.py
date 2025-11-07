@@ -722,7 +722,7 @@ def _basic_auth_skip(request: Request) -> bool:
 
     # GET-only public API dla UI
     if method == "GET":
-        excludes_prefix += ["/api/containers", "/api/sheets/containers", "/api/sheets/products"]
+        excludes_prefix += ["/api/containers", "/api/sheets/containers", "/api/sheets/products", "/api/drive/product-files"]
 
     # Dodatkowe wykluczenia z .env (BASIC_AUTH_EXCLUDE)
     # - wpisy zakończone "*" traktujemy jako prefiks
@@ -1265,6 +1265,72 @@ def sheet_products() -> List[Dict[str, Any]]:
     recs = _sheet_records(SHEET_PRODUCTS_TITLE)
     mapped = [_map_sheet_product(r) for r in recs if isinstance(r, dict) and any(str(v).strip() for v in r.values())]
     return mapped
+
+# Lista plików dla produktu (folder o nazwie produktu w Google Drive)
+@app.get("/api/drive/product-files")
+def drive_product_files(name: str, rootId: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Zwraca listę plików z folderu o nazwie produktu w Google Drive.
+    Założenie: folder o nazwie produktu znajduje się bezpośrednio pod folderem root (FOLDER_ID/DRIVE_FOLDER_ID lub wyprowadzony z FILE_ID).
+    Fallback: jeśli nie znajdziesz folderu bezpośrednio pod rootem, wyszukaj globalnie po nazwie.
+    """
+    _load_env_from_file()
+    try:
+        service = _drive_build_service()
+        file_id_sheet = os.environ.get("FILE_ID")
+        env_root_id = rootId or os.environ.get("FOLDER_ID") or os.environ.get("DRIVE_FOLDER_ID") or DRIVE_ROOT_FOLDER_ID
+        root_id = _drive_resolve_root_id(service, env_root_id, file_id_sheet)
+
+        import re
+        def sanitize(s: str) -> str:
+            s = re.sub(r"[^\w\-. ]", "_", s)
+            s = s.strip().replace(" ", "_")
+            return s[:100] or "product"
+
+        folder_name = sanitize(name or "product")
+
+        # 1) Spróbuj znaleźć folder o tej nazwie bezpośrednio pod rootem
+        q_root = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{root_id}' in parents and trashed=false"
+        resp_root = service.files().list(q=q_root, fields="files(id,name,parents)", pageSize=1).execute()
+        entries_root = resp_root.get("files", []) or []
+        folder_id = (entries_root[0]["id"] if entries_root else None)
+
+        # 2) Fallback: wyszukaj globalnie folder o tej nazwie (bez ograniczenia do rodzica)
+        if not folder_id:
+            q_any = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+            resp_any = service.files().list(q=q_any, fields="files(id,name,parents)", pageSize=10).execute()
+            entries_any = resp_any.get("files", []) or []
+            if entries_any:
+                # Preferuj folder bezpośrednio pod rootem, jeśli taki się znajdzie
+                folder_id = None
+                for f in entries_any:
+                    parents = f.get("parents", []) or []
+                    if root_id in parents:
+                        folder_id = f.get("id")
+                        break
+                if not folder_id:
+                    folder_id = entries_any[0].get("id")
+
+        out_files: List[Dict[str, Any]] = []
+        if folder_id:
+            files = _drive_list_files(service, folder_id)
+            for f in files:
+                out_files.append({
+                    "id": f.get("id"),
+                    "name": f.get("name"),
+                    "url": _drive_download_url(f.get("id"), f.get("webContentLink"), f.get("webViewLink")),
+                    "mimeType": f.get("mimeType"),
+                })
+
+        return {
+            "productName": name,
+            "folderId": folder_id,
+            "filesCount": len(out_files),
+            "files": out_files,
+            "rootId": root_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Drive product-files failed: {e}")
 
 # Fallback na index.html
 @app.get("/")

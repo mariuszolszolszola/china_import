@@ -17,6 +17,8 @@ const state = {
   filterMonth: null,
   isSyncingFromSheet: false,
   isSyncingProducts: false,
+  // Cache linków do załączników z Google Drive wg nazwy produktu
+  productFilesCache: {},
 };
 
 /* Elementy DOM */
@@ -421,12 +423,15 @@ async function syncProductsFromSheet(replaceExisting = false) {
     for (const rec of deduped) {
       const cid = rec.containerId != null ? parseInt(rec.containerId, 10) : NaN;
       const cname = String(rec.containerName || "").trim().toLowerCase();
-      const container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
+      let container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
       if (!container) {
-        // Pomijaj rekordy bez jednoznacznego powiązania z kontenerem (nie przypisuj do "pierwszego" kontenera)
-        continue;
+        // Fallback: przypisz produkt do pierwszego dostępnego kontenera (aby nie skończyć z pustą listą)
+        container = containers[0];
+        if (!container) {
+          continue;
+        }
       }
-
+ 
       const data = {
         name: rec.name || "",
         quantity: rec.quantity || "",
@@ -661,18 +666,8 @@ function renderContainersList() {
 
           const row = document.createElement("div");
           row.className = "product-row";
-          const attachmentsHtml = (() => {
-            const files = Array.isArray(p.files) ? p.files : [];
-            if (!files.length) {
-              return '<div class="product-files"><div class="files empty">Brak załączników</div></div>';
-            }
-            const links = files.map((u) => {
-              const name = fileNameFromUrl(u);
-              const safeUrl = typeof u === "string" ? u : "";
-              return `<a href="${safeUrl}" target="_blank" download>${name}</a>`;
-            }).join(", ");
-            return `<div class="product-files"><div class="files">Załączniki: ${links}</div></div>`;
-          })();
+          const pkey = encodeURIComponent(String(p.name || ""));
+          const attachmentsHtml = '<div class="product-files"><div class="files attachments empty" data-pkey="' + pkey + '">Brak załączników</div></div>';
           row.innerHTML = `
             <div class="product-main">
               <div class="product-name"><strong>${p.name}</strong> (ilość: ${Math.max(1, num(p.quantity, 1))})</div>
@@ -693,6 +688,22 @@ function renderContainersList() {
               <button class="btn danger" data-action="delete-product" data-cid="${c.id}" data-pid="${p.id}">Usuń</button>
             </div>
           `;
+          // Dociągnij załączniki po nazwie produktu (Drive) gdy lokalnie brak
+          (function hydrateAttachments() {
+            const attEl = row.querySelector(".attachments");
+            if (!attEl) return;
+            const localFiles = Array.isArray(p.files) ? p.files : [];
+            if (localFiles.length) {
+              renderAttachmentLinksInto(attEl, localFiles);
+              return;
+            }
+            fetchDriveFilesByProductName(p.name).then((urls) => {
+              if (urls && urls.length) {
+                p.files = urls;
+                renderAttachmentLinksInto(attEl, urls);
+              }
+            }).catch(() => {});
+          })();
           productsWrap.appendChild(row);
         });
       }
@@ -917,14 +928,15 @@ function renderProductsList() {
     const cid = String(container.id);
     const pid = String(product.id);
     const files = Array.isArray(product.files) ? product.files : [];
+    const key = encodeURIComponent(String(product.name || ""));
     const filesHtml = files.length
-      ? '<div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">'
+      ? '<div class="attachments" data-pkey="' + key + `" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">`
         + files.map(u => `<a href="${u}" download class="btn small" rel="noopener" target="_blank">Plik</a>`).join("")
         + '</div>'
-      : '<div class="empty">Brak załączników</div>';
+      : '<div class="attachments empty" data-pkey="' + key + '">Brak załączników</div>';
 
     return `
-      <div class="product-row product-card">
+      <div class="product-row product-card" data-pkey="${key}">
         <div class="product-main">
           <div class="product-name"><strong>${product.name || "Produkt"}</strong></div>
           <div class="product-meta">Kontener: ${container.name || ""} · Ilość: ${product.quantity || 0} · Waluta: ${product.totalPriceCurrency || "USD"} · CBM: ${product.productCbm || 0}</div>
@@ -944,6 +956,28 @@ function renderProductsList() {
     `;
   }).join("");
   box.innerHTML = html;
+
+  // Po renderze dociągnij załączniki z Google Drive dla elementów bez plików w stanie
+  try {
+    for (const { product } of items) {
+      const key = encodeURIComponent(String(product.name || ""));
+      // Znajdź placeholder attachments w kafelku produktu
+      const el = box.querySelector(`.product-card[data-pkey="${key}"] .attachments`);
+      if (!el) continue;
+      const localFiles = Array.isArray(product.files) ? product.files : [];
+      if (localFiles.length > 0) {
+        renderAttachmentLinksInto(el, localFiles);
+        continue;
+      }
+      // Brak lokalnych plików → dociągnij z Drive (cache w state.productFilesCache)
+      fetchDriveFilesByProductName(product.name).then((urls) => {
+        if (urls && urls.length) {
+          product.files = urls;
+          renderAttachmentLinksInto(el, urls);
+        }
+      }).catch(() => {});
+    }
+  } catch (_) {}
 }
 
 /* Odśwież produkty */
@@ -952,9 +986,9 @@ if (refreshProductsBtnEl) {
   refreshProductsBtnEl.addEventListener("click", async () => {
     // Załaduj aktualne kontenery
     await loadContainers();
-    // Wymuś pełną synchronizację produktów z arkusza
-    await syncProductsFromSheet(true);
-    // Ponownie załaduj kontenery z nowymi produktami
+    // Synchronizacja inkrementalna z arkusza (bez kasowania istniejących pozycji)
+    await syncProductsFromSheet(false);
+    // Ponownie załaduj kontenery
     await loadContainers();
     // Przerysuj listę produktów (kafelki)
     renderProductsList();
@@ -1074,6 +1108,43 @@ function fileNameFromUrl(url) {
     const parts = String(url).split("/");
     return parts.pop() || String(url);
   }
+}
+
+/* Pobieranie załączników z Google Drive wg nazwy produktu (folder = nazwa produktu) */
+async function fetchDriveFilesByProductName(name) {
+  const key = String(name || "").trim();
+  if (!key) return [];
+  if (!state.productFilesCache) state.productFilesCache = {};
+  if (state.productFilesCache[key]) return state.productFilesCache[key];
+  try {
+    const res = await api("GET", "/api/drive/product-files?name=" + encodeURIComponent(key));
+    const urls = Array.isArray(res?.files) ? res.files.map(f => f?.url).filter(Boolean) : [];
+    state.productFilesCache[key] = urls;
+    return urls;
+  } catch (_) {
+    state.productFilesCache[key] = [];
+    return [];
+  }
+}
+
+/* Wstaw/aktualizuj linki do załączników w podanym elemencie kontenera */
+function renderAttachmentLinksInto(containerEl, urls) {
+  if (!containerEl) return;
+  const list = Array.isArray(urls) ? urls : [];
+  if (!list.length) {
+    containerEl.classList.add("empty");
+    containerEl.innerHTML = "Brak załączników";
+    return;
+  }
+  containerEl.classList.remove("empty");
+  // Jeśli to nie jest kontener flex – ustaw style minimalne dla siatki
+  if (!containerEl.style.display) {
+    containerEl.style.display = "flex";
+    containerEl.style.flexWrap = "wrap";
+    containerEl.style.gap = "8px";
+    containerEl.style.marginTop = "8px";
+  }
+  containerEl.innerHTML = list.map(u => `<a href="${u}" download class="btn small" rel="noopener" target="_blank">Plik</a>`).join("");
 }
 
 function renderSelectedFilesPreview() {
@@ -1425,7 +1496,15 @@ document.addEventListener("click", async (ev) => {
   const pid = parseInt(target.getAttribute("data-pid") || "0", 10);
   const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
   const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
-  const urls = Array.isArray(p?.files) ? p.files : [];
+  let urls = Array.isArray(p?.files) ? p.files : [];
+  // Brak lokalnych linków → spróbuj pobrać z Drive wg nazwy produktu
+  if (!urls.length && p?.name) {
+    try {
+      urls = await fetchDriveFilesByProductName(p.name);
+    } catch (_) {
+      urls = [];
+    }
+  }
   if (!urls.length) {
     alert("Brak załączników do pobrania.");
     return;
