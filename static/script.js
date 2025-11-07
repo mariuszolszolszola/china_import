@@ -114,6 +114,11 @@ async function api(method, url, body) {
     if (ah) opts.headers["Authorization"] = ah;
   }
 
+  // Diagnostyka
+  try {
+    console.log("[API] Request", { method, url, body, headers: opts.headers });
+  } catch (_){}
+
   // Wykonaj żądanie
   let res = await fetch(url, opts);
 
@@ -126,6 +131,7 @@ async function api(method, url, body) {
       const ah2 = authHeader();
       if (ah2) {
         opts.headers["Authorization"] = ah2;
+        try { console.log("[API] Retrying with auth", { method, url }); } catch (_){}
         res = await fetch(url, opts);
       }
     }
@@ -134,8 +140,10 @@ async function api(method, url, body) {
   if (!res.ok) {
     let msg = "Request failed";
     try { const data = await res.json(); msg = data?.detail || JSON.stringify(data); } catch (_){}
+    try { console.error("[API] Error", { method, url, status: res.status, message: msg }); } catch (_){}
     throw new Error(msg);
   }
+  try { console.log("[API] Success", { method, url, status: res.status }); } catch (_){}
   if (res.status === 204) return null;
   return res.json();
 }
@@ -166,6 +174,34 @@ function convertPrice(priceUSD, exchangeRate) {
     return (priceUSD * er).toFixed(2) + " zł";
   }
   return priceUSD.toFixed(2) + " $";
+}
+
+/* Normalizacja daty z inputu (obsługa ręcznie wpisanego formatu dd.mm.rrrr oraz dd-mm-rrrr) */
+function normalizeDateValue(el) {
+  const raw = (el && el.value ? String(el.value).trim() : "");
+  if (!raw) return "";
+  // Usuń spacje (np. "21 . 11 . 2025" → "21.11.2025")
+  const v = raw.replace(/\s+/g, "");
+  // Jeśli input typu date – zwróci ISO (YYYY-MM-DD)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  // Obsłuż format dd.mm.rrrr
+  const m = v.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (m) {
+    const d = m[1].padStart(2, "0");
+    const mo = m[2].padStart(2, "0");
+    const y = m[3];
+    return `${y}-${mo}-${d}`;
+  }
+  // Obsłuż format dd-mm-rrrr
+  const m2 = v.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (m2) {
+    const d = m2[1].padStart(2, "0");
+    const mo = m2[2].padStart(2, "0");
+    const y = m2[3];
+    return `${y}-${mo}-${d}`;
+  }
+  // Inne formaty – zwróć oryginał
+  return v;
 }
 
 function fillSheetContainerSelect() {
@@ -349,16 +385,48 @@ async function syncProductsFromSheet(replaceExisting = false) {
     const byId = new Map(containers.map(c => [parseInt(c.id, 10), c]));
     const byName = new Map(containers.map(c => [String(c.name || "").trim().toLowerCase(), c]));
 
+    // Dedup: grupuj po nazwie produktu, preferuj rekordy z containerId; unikalnie po (containerId,name).
+    const norm = (s) => String(s || "").trim().toLowerCase();
+    const groups = new Map();
     for (const rec of sheetRows) {
+      const key = norm(rec.name);
+      const arr = groups.get(key) || [];
+      arr.push(rec);
+      groups.set(key, arr);
+    }
+    const deduped = [];
+    for (const [nameKey, arr] of groups.entries()) {
+      const withCid = arr.filter(r => r.containerId != null && Number.isFinite(parseInt(r.containerId, 10)));
+      if (withCid.length > 0) {
+        const seenCid = new Set();
+        for (const r of withCid) {
+          const cidS = String(parseInt(r.containerId, 10));
+          if (!seenCid.has(cidS)) {
+            seenCid.add(cidS);
+            deduped.push(r);
+          }
+        }
+      } else {
+        const seenCname = new Set();
+        for (const r of arr) {
+          const cnameN = norm(r.containerName);
+          if (!seenCname.has(cnameN)) {
+            seenCname.add(cnameN);
+            deduped.push(r);
+          }
+        }
+      }
+    }
+
+    for (const rec of deduped) {
       const cid = rec.containerId != null ? parseInt(rec.containerId, 10) : NaN;
       const cname = String(rec.containerName || "").trim().toLowerCase();
-      let container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
+      const container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
       if (!container) {
-        // Fallback: przypisz produkt do pierwszego dostępnego kontenera
-        container = containers[0];
-        if (!container) continue;
+        // Pomijaj rekordy bez jednoznacznego powiązania z kontenerem (nie przypisuj do "pierwszego" kontenera)
+        continue;
       }
-    
+
       const data = {
         name: rec.name || "",
         quantity: rec.quantity || "",
@@ -638,12 +706,24 @@ function renderContainersList() {
 
 /* Obsługa formularzy */
 function readContainerForm() {
-  return {
+  const rawOrder = els.cOrderDate ? els.cOrderDate.value : "";
+  const rawPayment = els.cPaymentDate ? els.cPaymentDate.value : "";
+  const rawDelivery = els.cDeliveryDate ? els.cDeliveryDate.value : "";
+  const orderDate = normalizeDateValue(els.cOrderDate);
+  const paymentDate = normalizeDateValue(els.cPaymentDate);
+  const deliveryDate = normalizeDateValue(els.cDeliveryDate);
+
+  try {
+    console.debug("[Form] Container raw", { rawOrder, rawPayment, rawDelivery });
+    console.debug("[Form] Container normalized", { orderDate, paymentDate, deliveryDate });
+  } catch (_){}
+
+  const data = {
     name: els.cName.value.trim(),
-    orderDate: els.cOrderDate.value || "",
-    paymentDate: els.cPaymentDate.value || null,
-    productionDays: els.cProductionDays.value || "",
-    deliveryDate: els.cDeliveryDate.value || null,
+    orderDate: orderDate || "",
+    paymentDate: paymentDate || null,
+    productionDays: (els.cProductionDays.value || "30"),
+    deliveryDate: deliveryDate || null,
     exchangeRate: els.cExchangeRate.value || "4.0",
 
     containerCost: els.cContainerCost.value || "",
@@ -670,6 +750,10 @@ function readContainerForm() {
     deliveredToWarehouse: !!els.cDeliveredToWarehouse.checked,
     documentsInSystem: !!els.cDocumentsInSystem.checked,
   };
+
+  try { console.debug("[Form] Container data", data); } catch (_){}
+
+  return data;
 }
 
 function populateContainerForm(c) {
@@ -854,6 +938,7 @@ function renderProductsList() {
         <div class="product-actions">
           <button class="btn small" data-action="edit-product" data-cid="${cid}" data-pid="${pid}">Edytuj</button>
           <button class="btn small" data-action="download-all" data-cid="${cid}" data-pid="${pid}">Pobierz pliki</button>
+          <button class="btn small" data-action="delete-product" data-cid="${cid}" data-pid="${pid}">Usuń</button>
         </div>
       </div>
     `;
@@ -883,17 +968,33 @@ if (productsListEl) {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
     const action = target.getAttribute("data-action");
-    if (action !== "edit-product") return;
-    const cid = parseInt(target.getAttribute("data-cid"), 10);
-    const pid = parseInt(target.getAttribute("data-pid"), 10);
-    const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
-    const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
-    if (!c || !p) return;
-    state.editingProductId = pid;
-    populateProductForm(cid, p);
-    state.showProductForm = true;
-    els.productFormSection.classList.remove("hidden");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!action) return;
+
+    if (action === "edit-product") {
+      const cid = parseInt(target.getAttribute("data-cid"), 10);
+      const pid = parseInt(target.getAttribute("data-pid"), 10);
+      const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
+      const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+      if (!c || !p) return;
+      state.editingProductId = pid;
+      populateProductForm(cid, p);
+      state.showProductForm = true;
+      els.productFormSection.classList.remove("hidden");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    if (action === "delete-product") {
+      const cid = parseInt(target.getAttribute("data-cid"), 10);
+      const pid = parseInt(target.getAttribute("data-pid"), 10);
+      if (!confirm("Czy na pewno chcesz usunąć ten produkt?")) return;
+      try {
+        await api("DELETE", `/api/containers/${cid}/products/${pid}`);
+        await loadContainers();
+        renderProductsList();
+      } catch (e) {
+        alert("Błąd usuwania produktu: " + e.message);
+      }
+    }
   });
 }
 
@@ -910,15 +1011,20 @@ els.toggleContainerFormBtn.addEventListener("click", () => {
 });
 
 els.saveContainerBtn.addEventListener("click", async () => {
+  try { console.log("[UI] SaveContainer: click", { editingContainerId: state.editingContainerId }); } catch (_){}
   const data = readContainerForm();
+  try { console.log("[UI] SaveContainer: payload", data); } catch (_){}
   if (!data.name || !data.orderDate || !data.productionDays || !data.exchangeRate) {
+    try { console.warn("[UI] SaveContainer: validation failed", { name: !!data.name, orderDate: data.orderDate, productionDays: data.productionDays, exchangeRate: data.exchangeRate }); } catch (_){}
     alert("Wypełnij wszystkie wymagane pola kontenera!");
     return;
   }
   try {
     if (state.editingContainerId) {
+      try { console.log("[UI] SaveContainer: PUT", { id: state.editingContainerId }); } catch (_){}
       await api("PUT", `/api/containers/${state.editingContainerId}`, data);
     } else {
+      try { console.log("[UI] SaveContainer: POST", {}); } catch (_){}
       await api("POST", "/api/containers", data);
     }
     await loadContainers();
@@ -926,7 +1032,9 @@ els.saveContainerBtn.addEventListener("click", async () => {
     state.showContainerForm = false;
     els.containerFormSection.classList.add("hidden");
     resetContainerForm();
+    try { console.log("[UI] SaveContainer: done"); } catch (_){}
   } catch (e) {
+    try { console.error("[UI] SaveContainer: error", e); } catch (_){}
     alert("Błąd zapisu kontenera: " + e.message);
   }
 });

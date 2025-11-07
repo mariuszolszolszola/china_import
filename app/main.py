@@ -336,6 +336,79 @@ def _on_created_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
     print(f"[Sheets] Container sync {'OK' if ok else 'FAILED'}")
     return ok
 
+def _col_letter(n: int) -> str:
+    """Konwersja indeksu kolumny (1-based) na literę arkusza (A, B, ..., AA, AB, ...)"""
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters or "A"
+
+def _sheet_build_row(headers: List[str], record: Dict[str, Any]) -> List[Any]:
+    """Zbuduj listę wartości w kolejności nagłówków."""
+    return [record.get(h, "") for h in headers]
+
+def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, value: Any, record: Dict[str, Any]) -> bool:
+    """
+    Zaktualizuj pojedynczy wiersz w arkuszu 'title', znajdując go po wartości w kolumnie 'key'.
+    Wartości wpisywane są zgodnie z kolejnością nagłówków (USER_ENTERED).
+    """
+    _load_env_from_file()
+    client = _get_gspread_client()
+    file_id = os.environ.get("FILE_ID")
+
+    if not client or not file_id:
+        print(f"[Sheets] Skip update for '{title}' due to missing config")
+        return False
+
+    try:
+        sh = client.open_by_key(file_id)
+        ws = sh.worksheet(title)
+        headers = _sheet_ensure_headers(ws, default_headers)
+
+        try:
+            key_index = headers.index(key) + 1  # 1-based indeks kolumny
+        except ValueError:
+            print(f"[Sheets] Key '{key}' not found in headers -> update aborted")
+            return False
+
+        # Znajdź numer wiersza z wartością 'value' w kolumnie 'key'
+        col_vals = ws.col_values(key_index)
+        target_row = None
+        for idx, cell in enumerate(col_vals[1:], start=2):  # pomiń nagłówek (row 1)
+            if str(cell).strip() == str(value).strip():
+                target_row = idx
+                break
+
+        if not target_row:
+            print(f"[Sheets] Row with {key}='{value}' not found -> update aborted")
+            return False
+
+        row_values = _sheet_build_row(headers, record)
+        end_col = _col_letter(len(headers))
+        rng = f"A{target_row}:{end_col}{target_row}"
+        ws.update(rng, [row_values], value_input_option="USER_ENTERED")
+        print(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
+        return True
+    except Exception as e:
+        print(f"[Sheets] Update failed for '{title}': {e}")
+        return False
+
+def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
+    """
+    Zapisz zmiany kontenera do arkusza (write-through na PUT).
+    Obecnie dopasowanie po 'name'; w przyszłości zalecane dopasowanie po 'id' kolumnie.
+    """
+    if SHEETS_SYNC_ON_WRITE != "1":
+        print("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        return False
+    rec = {**container}
+    rec.pop("id", None)
+    rec.pop("products", None)
+    ok = _sheet_update_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "name", container.get("name", ""), rec)
+    print(f"[Sheets] Container update sync {'OK' if ok else 'FAILED'}")
+    return ok
+
 def _on_added_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str, Any]) -> bool:
     if SHEETS_SYNC_ON_WRITE != "1":
         print("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
@@ -347,6 +420,106 @@ def _on_added_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str
     ok = _sheet_append_row_dynamic(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, rec)
     print(f"[Sheets] Product sync {'OK' if ok else 'FAILED'} (containerId={rec['containerId']})")
     return ok
+
+def _sheet_update_row_by_keys(title: str, default_headers: List[str], keys_values: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    """
+    Zaktualizuj jeden wiersz dopasowując po WIELU kolumnach (np. containerId + name).
+    keys_values: słownik {kolumna: wartość} – wszystkie muszą pasować w danym wierszu.
+    """
+    _load_env_from_file()
+    client = _get_gspread_client()
+    file_id = os.environ.get("FILE_ID")
+
+    if not client or not file_id:
+        print(f"[Sheets] Skip update for '{title}' due to missing config")
+        return False
+
+    try:
+        sh = client.open_by_key(file_id)
+        ws = sh.worksheet(title)
+        headers = _sheet_ensure_headers(ws, default_headers)
+
+        # Wyznacz indeksy kolumn dla kluczy
+        key_names = list(keys_values.keys())
+        key_indices: List[int] = []
+        for k in key_names:
+            try:
+                key_indices.append(headers.index(k) + 1)
+            except ValueError:
+                print(f"[Sheets] Key '{k}' not found in headers -> update aborted")
+                return False
+
+        # Pobierz wartości kolumn dla każdego klucza
+        cols: List[List[str]] = []
+        for idx in key_indices:
+            try:
+                cols.append(ws.col_values(idx))
+            except Exception:
+                cols.append([])
+
+        # Szukaj wiersza, w którym WSZYSTKIE klucze pasują
+        target_row: Optional[int] = None
+        max_rows = max((len(c) for c in cols), default=0)
+        for row in range(2, max_rows + 1):  # pomijamy nagłówek
+            match = True
+            for ci, k in enumerate(key_names):
+                column_vals = cols[ci]
+                cell = column_vals[row - 1] if (row - 1) < len(column_vals) else ""
+                if str(cell).strip() != str(keys_values[k]).strip():
+                    match = False
+                    break
+            if match:
+                target_row = row
+                break
+
+        if not target_row:
+            print(f"[Sheets] Row with keys {keys_values} not found -> update aborted")
+            return False
+
+        row_values = _sheet_build_row(headers, record)
+        end_col = _col_letter(len(headers))
+        rng = f"A{target_row}:{end_col}{target_row}"
+        ws.update(rng, [row_values], value_input_option="USER_ENTERED")
+        print(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
+        return True
+    except Exception as e:
+        print(f"[Sheets] Update failed for '{title}': {e}")
+        return False
+
+def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str, Any]) -> bool:
+    """
+    Write-through dla edycji produktu (PUT):
+    - Preferowane dopasowanie po (containerId + name)
+    - Fallback: (containerName + name)
+    - Ostateczny fallback: (name)
+    """
+    if SHEETS_SYNC_ON_WRITE != "1":
+        print("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        return False
+
+    rec = {**product}
+    rec.pop("id", None)
+    rec["containerName"] = container.get("name", "")
+    rec["containerId"] = container.get("id")
+
+    variants: List[Dict[str, Any]] = [
+        {"containerId": rec.get("containerId"), "name": rec.get("name", "")},
+        {"containerName": rec.get("containerName"), "name": rec.get("name", "")},
+        {"name": rec.get("name", "")},
+    ]
+
+    for kv in variants:
+        # Usuń puste wartości, aby nie blokować dopasowania
+        kv_clean = {k: v for k, v in kv.items() if v not in (None, "")}
+        if not kv_clean:
+            continue
+        ok = _sheet_update_row_by_keys(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, kv_clean, rec)
+        if ok:
+            print("[Sheets] Product update sync OK")
+            return True
+
+    print("[Sheets] Product update sync FAILED")
+    return False
 
 class ProductIn(BaseModel):
     name: str
@@ -515,6 +688,12 @@ app.add_middleware(
 # Opcjonalnie: BASIC_AUTH_EXCLUDE=/api/oauth/callback,/api/oauth/url,/api/health
 def _basic_auth_enabled() -> bool:
     _load_env_from_file()
+    # W produkcji (VERCEL) – egzekwuj Basic Auth.
+    # Lokalnie – domyślnie wyłącz, aby umożliwić testy w przeglądarce bez promptów.
+    vercel = bool(os.environ.get("VERCEL"))
+    force = (os.environ.get("BASIC_AUTH_FORCE") or "").strip() == "1"
+    if not vercel and not force:
+        return False
     return bool(os.environ.get("BASIC_AUTH_USERNAME")) and bool(os.environ.get("BASIC_AUTH_PASSWORD"))
 
 def _basic_auth_skip(request: Request) -> bool:
@@ -589,6 +768,14 @@ async def _basic_auth_middleware(request: Request, call_next):
 # Serwowanie plików statycznych
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
+
+# Strona główna – serwuj plik statyczny index.html (np. dla lokalnego uruchomienia uvicorn)
+@app.get("/")
+def serve_index() -> Response:
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(path=str(index_path))
+    return Response(content="<html><body><h1>Brak UI</h1><p>Plik static/index.html nie istnieje.</p></body></html>", media_type="text/html")
 
 # Endpoint wersji – short SHA + opcjonalny buildNumber
 @app.get("/api/version")
@@ -881,6 +1068,11 @@ def update_container(container_id: int, payload: ContainerUpdate) -> Container:
             updated["products"] = products
             data[i] = updated
             _save_data(data)
+            # write-through do Google Sheets (ignoruj błędy)
+            try:
+                _on_updated_container_sync_to_sheet(updated)
+            except Exception:
+                pass
             return updated
     raise HTTPException(status_code=404, detail="Container not found")
 
@@ -975,18 +1167,47 @@ def delete_container(container_id: int):
 
 @app.post("/api/containers/{container_id}/products", status_code=201)
 def add_product(container_id: int, payload: ProductIn, request: Request) -> Product:
+    """
+    Dodawanie produktu:
+    - Normalnie (bez parametru source=sheet): zawsze tworzy nowy wpis i appenduje do arkusza.
+    - Import z arkusza (source=sheet): antyduplikacja po nazwie w obrębie kontenera (case-insensitive);
+      jeśli istnieje produkt o tej samej nazwie → aktualizujemy istniejący (zachowując jego id) zamiast dodawać duplikat.
+    """
     data = _load_data()
     for i, item in enumerate(data):
         if int(item.get("id")) == container_id:
-            p = Product(**payload.dict())
             products = item.get("products", [])
+
+            # Źródło żądania (np. import z arkusza)
+            try:
+                src = (request.query_params.get("source") or "").strip().lower()
+            except Exception:
+                src = ""
+
+            if src == "sheet":
+                # Antyduplikacja: znajdź istniejący produkt o tej samej nazwie (case-insensitive)
+                name_ci = str(payload.name or "").strip().lower()
+                existing_idx = next((j for j, p in enumerate(products) if str(p.get("name", "")).strip().lower() == name_ci), -1)
+                if existing_idx >= 0:
+                    # Aktualizuj istniejący produkt, zachowując jego id
+                    existing_id = int(products[existing_idx].get("id"))
+                    new_prod = {"id": existing_id, **payload.dict()}
+                    products[existing_idx] = new_prod
+                    item["products"] = products
+                    data[i] = item
+                    _save_data(data)
+                    # Import z arkusza nie powinien wykonywać append do Sheets
+                    return new_prod
+
+            # Domyślnie: utwórz nowy produkt
+            p = Product(**payload.dict())
             products.append(p.dict())
             item["products"] = products
             data[i] = item
             _save_data(data)
+
             # zapis do Google Sheets (append); ignoruj błędy
             try:
-                src = (request.query_params.get("source") or "").strip().lower()
                 if src != "sheet":
                     _on_added_product_sync_to_sheet(item, p.dict())
             except Exception:
@@ -1008,6 +1229,11 @@ def update_product(container_id: int, product_id: int, payload: ProductIn) -> Pr
                     item["products"] = products
                     data[i] = item
                     _save_data(data)
+                    # write-through do Google Sheets (ignoruj błędy)
+                    try:
+                        _on_updated_product_sync_to_sheet(item, new_prod)
+                    except Exception:
+                        pass
                     return new_prod
             raise HTTPException(status_code=404, detail="Product not found")
     raise HTTPException(status_code=404, detail="Container not found")
