@@ -694,13 +694,38 @@ function renderContainersList() {
             if (!attEl) return;
             const localFiles = Array.isArray(p.files) ? p.files : [];
             if (localFiles.length) {
-              renderAttachmentLinksInto(attEl, localFiles);
+              // Jeśli lokalne linki wyglądają jak linki Drive bez nazwy (np. /uc?export=download&id=...),
+              // spróbuj podciągnąć nazwy z Drive i zmapować po fileId.
+              const shouldUpgrade = localFiles.some(x => {
+                const href = (typeof x === "object" && x !== null) ? (x.url || "") : String(x || "");
+                const hasName = (typeof x === "object" && x !== null) && !!x.name;
+                return !hasName && needsNameFromDrive(href);
+              });
+              if (shouldUpgrade) {
+                fetchDriveFilesByProductName(p.name).then((objs) => {
+                  if (objs && objs.length) {
+                    const byId = new Map(objs.map(o => [extractDriveFileId(o.url), o]));
+                    const upgraded = localFiles.map(x => {
+                      const href = (typeof x === "object" && x !== null) ? (x.url || "") : String(x || "");
+                      const id = extractDriveFileId(href);
+                      const match = id ? byId.get(id) : null;
+                      return match ? match : { url: href, name: fileNameFromUrl(href) };
+                    });
+                    p.files = upgraded;
+                    renderAttachmentLinksInto(attEl, upgraded);
+                  } else {
+                    renderAttachmentLinksInto(attEl, localFiles);
+                  }
+                }).catch(() => { renderAttachmentLinksInto(attEl, localFiles); });
+              } else {
+                renderAttachmentLinksInto(attEl, localFiles);
+              }
               return;
             }
-            fetchDriveFilesByProductName(p.name).then((urls) => {
-              if (urls && urls.length) {
-                p.files = urls;
-                renderAttachmentLinksInto(attEl, urls);
+            fetchDriveFilesByProductName(p.name).then((objs) => {
+              if (objs && objs.length) {
+                p.files = objs;
+                renderAttachmentLinksInto(attEl, objs);
               }
             }).catch(() => {});
           })();
@@ -846,7 +871,7 @@ function populateProductForm(cId, p) {
   els.pTotalPriceCurrency.textContent = p.totalPriceCurrency || "USD";
   els.pProductCbm.value = p.productCbm || "";
   els.pCustomsDutyPercent.value = p.customsDutyPercent || "";
-  state.productOriginalFiles = Array.isArray(p.files) ? p.files.slice() : [];
+  state.productOriginalFiles = Array.isArray(p.files) ? p.files.map(x => (typeof x === "string" ? x : (x && x.url ? x.url : null))).filter(Boolean) : [];
   if (els.pFiles) els.pFiles.value = "";
   if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
 }
@@ -931,7 +956,12 @@ function renderProductsList() {
     const key = encodeURIComponent(String(product.name || ""));
     const filesHtml = files.length
       ? '<div class="attachments" data-pkey="' + key + `" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">`
-        + files.map(u => `<a href="${u}" download class="btn small" rel="noopener" target="_blank">Plik</a>`).join("")
+        + files.map(u => {
+            const isObj = typeof u === "object" && u !== null;
+            const href = isObj ? (u.url || "") : String(u || "");
+            const label = isObj ? (u.name || fileNameFromUrl(href)) : fileNameFromUrl(href);
+            return href ? `<a href="${href}" download class="btn small" rel="noopener" target="_blank">${label}</a>` : "";
+          }).filter(Boolean).join("")
         + '</div>'
       : '<div class="attachments empty" data-pkey="' + key + '">Brak załączników</div>';
 
@@ -957,7 +987,7 @@ function renderProductsList() {
   }).join("");
   box.innerHTML = html;
 
-  // Po renderze dociągnij załączniki z Google Drive dla elementów bez plików w stanie
+  // Po renderze dociągnij załączniki z Google Drive; gdy lokalne linki są z Drive bez nazw – spróbuj ulepszyć
   try {
     for (const { product } of items) {
       const key = encodeURIComponent(String(product.name || ""));
@@ -966,14 +996,37 @@ function renderProductsList() {
       if (!el) continue;
       const localFiles = Array.isArray(product.files) ? product.files : [];
       if (localFiles.length > 0) {
-        renderAttachmentLinksInto(el, localFiles);
+        const shouldUpgrade = localFiles.some(x => {
+          const href = (typeof x === "object" && x !== null) ? (x.url || "") : String(x || "");
+          const hasName = (typeof x === "object" && x !== null) && !!x.name;
+          return !hasName && needsNameFromDrive(href);
+        });
+        if (shouldUpgrade) {
+          fetchDriveFilesByProductName(product.name).then((objs) => {
+            if (objs && objs.length) {
+              const byId = new Map(objs.map(o => [extractDriveFileId(o.url), o]));
+              const upgraded = localFiles.map(x => {
+                const href = (typeof x === "object" && x !== null) ? (x.url || "") : String(x || "");
+                const id = extractDriveFileId(href);
+                const match = id ? byId.get(id) : null;
+                return match ? match : { url: href, name: fileNameFromUrl(href) };
+              });
+              product.files = upgraded;
+              renderAttachmentLinksInto(el, upgraded);
+            } else {
+              renderAttachmentLinksInto(el, localFiles);
+            }
+          }).catch(() => { renderAttachmentLinksInto(el, localFiles); });
+        } else {
+          renderAttachmentLinksInto(el, localFiles);
+        }
         continue;
       }
       // Brak lokalnych plików → dociągnij z Drive (cache w state.productFilesCache)
-      fetchDriveFilesByProductName(product.name).then((urls) => {
-        if (urls && urls.length) {
-          product.files = urls;
-          renderAttachmentLinksInto(el, urls);
+      fetchDriveFilesByProductName(product.name).then((objs) => {
+        if (objs && objs.length) {
+          product.files = objs;
+          renderAttachmentLinksInto(el, objs);
         }
       }).catch(() => {});
     }
@@ -1096,7 +1149,6 @@ function toggleCurrencyButton(btn) {
 ].forEach((btn) => {
   btn.addEventListener("click", () => toggleCurrencyButton(btn));
 });
-
 /* Załączniki produktu – podgląd wybranych plików i upload */
 function fileNameFromUrl(url) {
   try {
@@ -1110,6 +1162,36 @@ function fileNameFromUrl(url) {
   }
 }
 
+/* Ekstrakcja fileId z różnych wariantów URL Google Drive */
+function extractDriveFileId(url) {
+  try {
+    const u = new URL(String(url), window.location.origin);
+    const qid = u.searchParams.get("id");
+    if (qid) return qid;
+    const m = u.pathname.match(/\/file\/d\/([^/]+)/);
+    if (m) return m[1];
+    const m2 = String(url).match(/[?&]id=([^&]+)/);
+    if (m2) return m2[1];
+    return null;
+  } catch (_) {
+    const m = String(url).match(/\/file\/d\/([^/]+)/);
+    if (m) return m[1];
+    const m2 = String(url).match(/[?&]id=([^&]+)/);
+    if (m2) return m2[1];
+    return null;
+  }
+}
+
+/* Czy link wygląda na Google Drive i ma generyczną etykietę (np. 'uc') → potrzebna nazwa z API */
+function needsNameFromDrive(url) {
+  const href = String(url || "");
+  const isDrive = href.includes("drive.google.com");
+  const label = fileNameFromUrl(href);
+  const generic = (label === "uc" || label === "open" || label === "file" || label === "view" || label === "download");
+  const hasExt = /\.[a-zA-Z0-9]{2,6}$/.test(label);
+  return isDrive && (generic || !hasExt);
+}
+
 /* Pobieranie załączników z Google Drive wg nazwy produktu (folder = nazwa produktu) */
 async function fetchDriveFilesByProductName(name) {
   const key = String(name || "").trim();
@@ -1118,9 +1200,16 @@ async function fetchDriveFilesByProductName(name) {
   if (state.productFilesCache[key]) return state.productFilesCache[key];
   try {
     const res = await api("GET", "/api/drive/product-files?name=" + encodeURIComponent(key));
-    const urls = Array.isArray(res?.files) ? res.files.map(f => f?.url).filter(Boolean) : [];
-    state.productFilesCache[key] = urls;
-    return urls;
+    const entries = Array.isArray(res?.files) ? res.files : [];
+    const list = entries.map(f => {
+      const url = f?.url || "";
+      const nm = f?.name || "";
+      if (url && nm) return { url, name: nm };
+      if (url) return { url, name: fileNameFromUrl(url) };
+      return null;
+    }).filter(Boolean);
+    state.productFilesCache[key] = list;
+    return list;
   } catch (_) {
     state.productFilesCache[key] = [];
     return [];
@@ -1144,7 +1233,12 @@ function renderAttachmentLinksInto(containerEl, urls) {
     containerEl.style.gap = "8px";
     containerEl.style.marginTop = "8px";
   }
-  containerEl.innerHTML = list.map(u => `<a href="${u}" download class="btn small" rel="noopener" target="_blank">Plik</a>`).join("");
+  containerEl.innerHTML = list.map(u => {
+    const isObj = typeof u === "object" && u !== null;
+    const href = isObj ? (u.url || "") : String(u || "");
+    const label = isObj ? (u.name || fileNameFromUrl(href)) : fileNameFromUrl(href);
+    return href ? `<a href="${href}" download class="btn small" rel="noopener" target="_blank">${label}</a>` : "";
+  }).filter(Boolean).join("");
 }
 
 function renderSelectedFilesPreview() {
@@ -1200,12 +1294,14 @@ async function uploadProductFiles(productName, files) {
 }
 
 /* Pobierz wszystkie załączniki produktu – sekwencyjnie otwiera linki (może otwierać nowe karty) */
-async function downloadAllAttachments(urls) {
-  const list = Array.isArray(urls) ? urls : [];
+async function downloadAllAttachments(items) {
+  const list = Array.isArray(items) ? items : [];
   for (const u of list) {
     try {
+      const href = (typeof u === "object" && u !== null) ? (u.url || "") : String(u || "");
+      if (!href) continue;
       const a = document.createElement("a");
-      a.href = String(u);
+      a.href = href;
       a.target = "_blank";
       a.rel = "noopener";
       a.download = "";
@@ -1302,7 +1398,8 @@ els.saveProductBtn.addEventListener("click", async () => {
     if (filesToUpload.length > 0) {
       uploadedUrls = await uploadProductFiles(data.name, filesToUpload);
     }
-    data.files = [...(state.productOriginalFiles || []), ...uploadedUrls];
+    const normalize = (arr) => (Array.isArray(arr) ? arr.map(x => (typeof x === "string" ? x : (x && x.url ? x.url : null))).filter(Boolean) : []);
+    data.files = [...normalize(state.productOriginalFiles || []), ...normalize(uploadedUrls)];
 
     if (state.editingProductId) {
       await api("PUT", `/api/containers/${containerId}/products/${state.editingProductId}`, data);
