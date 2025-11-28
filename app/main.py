@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
@@ -609,13 +610,10 @@ class ContainerUpdate(BaseModel):
 
     # pickupDate wyliczamy automatycznie na podstawie orderDate + productionDays
 
-app = FastAPI(title="Import Tracker API", version="0.1.0")
+# (Removed old app definition)
 
-# Auto-import z arkusza przy starcie aplikacji:
-# - Jeśli brak kontenerów w pamięci → importuj kontenery z arkusza
-# - Jeśli brak produktów → importuj produkty i przypisz do kontenerów po nazwie (fallback: pierwszy kontener)
-@app.on_event("startup")
 def _auto_import_from_sheets_on_start() -> None:
+    # Auto-import z arkusza przy starcie aplikacji
     try:
         data = _load_data()
         # Import kontenerów gdy brak danych
@@ -624,11 +622,11 @@ def _auto_import_from_sheets_on_start() -> None:
             new_data: List[Dict[str, Any]] = []
             for rec in cs:
                 try:
-                    c = Container(**rec).dict()
+                    c = Container(**rec).model_dump()
                 except Exception:
                     # Fallback przez ContainerIn
                     try:
-                        c = Container(**ContainerIn(**rec).dict()).dict()
+                        c = Container(**ContainerIn(**rec).model_dump()).model_dump()
                     except Exception:
                         continue
                 # pickupDate wyliczane lokalnie
@@ -662,7 +660,7 @@ def _auto_import_from_sheets_on_start() -> None:
                         "files": [],
                     }
                     try:
-                        p = Product(**payload).dict()
+                        p = Product(**payload).model_dump()
                     except Exception:
                         # W skrajnych przypadkach akceptuj bez pydantic (minimalny rekord)
                         p = {"id": _next_id(), **payload}
@@ -675,6 +673,13 @@ def _auto_import_from_sheets_on_start() -> None:
             print(f"[Startup] Auto import from sheets failed: {e}")
         except Exception:
             pass
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _auto_import_from_sheets_on_start()
+    yield
+
+app = FastAPI(title="Import Tracker API", version="0.1.0", lifespan=lifespan)
 
 # CORS – w razie potrzeby (gdyby statyki były serwowane z innego hosta)
 app.add_middleware(
@@ -1039,20 +1044,20 @@ def list_containers() -> List[Container]:
 
 @app.post("/api/containers", status_code=201)
 def create_container(payload: ContainerIn, request: Request) -> Container:
-    c = Container(**payload.dict())
+    c = Container(**payload.model_dump())
     c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
     data = _load_data()
-    data.append(c.dict())
+    data.append(c.model_dump())
     _save_data(data)
     # zapis do Google Sheets (append); ignoruj błędy
     # jeżeli import z arkusza (source=sheet) – pomiń append, aby nie duplikować wierszy
     try:
         src = (request.query_params.get("source") or "").strip().lower()
         if src != "sheet":
-            _on_created_container_sync_to_sheet(c.dict())
+            _on_created_container_sync_to_sheet(c.model_dump())
     except Exception:
         pass
-    return c.dict()
+    return c.model_dump()
 
 @app.put("/api/containers/{container_id}")
 def update_container(container_id: int, payload: ContainerUpdate) -> Container:
@@ -1062,7 +1067,7 @@ def update_container(container_id: int, payload: ContainerUpdate) -> Container:
             # zachowaj products
             products = item.get("products", [])
             # zaktualizuj pola
-            updated = {**item, **{k: v for k, v in payload.dict(exclude_unset=True).items()}}
+            updated = {**item, **{k: v for k, v in payload.model_dump(exclude_unset=True).items()}}
             # przelicz pickupDate jeśli dotyczy
             orderDate = updated.get("orderDate")
             productionDays = updated.get("productionDays")
@@ -1193,7 +1198,7 @@ def add_product(container_id: int, payload: ProductIn, request: Request) -> Prod
                 if existing_idx >= 0:
                     # Aktualizuj istniejący produkt, zachowując jego id
                     existing_id = int(products[existing_idx].get("id"))
-                    new_prod = {"id": existing_id, **payload.dict()}
+                    new_prod = {"id": existing_id, **payload.model_dump()}
                     products[existing_idx] = new_prod
                     item["products"] = products
                     data[i] = item
@@ -1202,8 +1207,8 @@ def add_product(container_id: int, payload: ProductIn, request: Request) -> Prod
                     return new_prod
 
             # Domyślnie: utwórz nowy produkt
-            p = Product(**payload.dict())
-            products.append(p.dict())
+            p = Product(**payload.model_dump())
+            products.append(p.model_dump())
             item["products"] = products
             data[i] = item
             _save_data(data)
@@ -1211,10 +1216,10 @@ def add_product(container_id: int, payload: ProductIn, request: Request) -> Prod
             # zapis do Google Sheets (append); ignoruj błędy
             try:
                 if src != "sheet":
-                    _on_added_product_sync_to_sheet(item, p.dict())
+                    _on_added_product_sync_to_sheet(item, p.model_dump())
             except Exception:
                 pass
-            return p.dict()
+            return p.model_dump()
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.put("/api/containers/{container_id}/products/{product_id}")
@@ -1226,7 +1231,7 @@ def update_product(container_id: int, product_id: int, payload: ProductIn) -> Pr
             for j, prod in enumerate(products):
                 if int(prod.get("id")) == product_id:
                     # zachowujemy id, resztę nadpisujemy
-                    new_prod = {"id": product_id, **payload.dict()}
+                    new_prod = {"id": product_id, **payload.model_dump()}
                     products[j] = new_prod
                     item["products"] = products
                     data[i] = item
@@ -1506,7 +1511,7 @@ def import_from_drive(req: DriveImportRequest) -> Dict[str, Any]:
         if idx < 0:
             c = Container(name=cname, orderDate="", productionDays="0", exchangeRate="4.0")
             c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
-            c_dict = c.dict()
+            c_dict = c.model_dump()
             data.append(c_dict)
             imported_containers += 1
             try:
@@ -1527,7 +1532,7 @@ def import_from_drive(req: DriveImportRequest) -> Dict[str, Any]:
 
             if p_found_index < 0:
                 p = Product(name=pname, quantity="1", totalPrice="0", totalPriceCurrency="USD", productCbm="", customsDutyPercent="")
-                p_dict = p.dict()
+                p_dict = p.model_dump()
                 p_dict["files"] = files_urls
                 products.append(p_dict)
                 data[idx]["products"] = products
@@ -1557,7 +1562,7 @@ def import_from_drive(req: DriveImportRequest) -> Dict[str, Any]:
         if idx < 0:
             c = Container(name=cname, orderDate="", productionDays="0", exchangeRate="4.0")
             c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
-            c_dict = c.dict()
+            c_dict = c.model_dump()
             data.append(c_dict)
             imported_containers += 1
             try:
@@ -1576,7 +1581,7 @@ def import_from_drive(req: DriveImportRequest) -> Dict[str, Any]:
 
         if p_found_index < 0:
             p = Product(name=pname, quantity="1", totalPrice="0", totalPriceCurrency="USD", productCbm="", customsDutyPercent="")
-            p_dict = p.dict()
+            p_dict = p.model_dump()
             p_dict["files"] = files_urls
             products.append(p_dict)
             data[idx]["products"] = products
