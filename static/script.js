@@ -1093,6 +1093,11 @@ if (productsListEl) {
         await loadContainers();
         renderProductsList();
       } catch (e) {
+        if (e.message.includes("Container not found") || e.message.includes("Product not found")) {
+          alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
+          window.location.reload();
+          return;
+        }
         alert("Błąd usuwania produktu: " + e.message);
       }
     }
@@ -1136,6 +1141,11 @@ els.saveContainerBtn.addEventListener("click", async () => {
     try { console.log("[UI] SaveContainer: done"); } catch (_){}
   } catch (e) {
     try { console.error("[UI] SaveContainer: error", e); } catch (_){}
+    if (e.message.includes("Container not found")) {
+      alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
+      window.location.reload();
+      return;
+    }
     alert("Błąd zapisu kontenera: " + e.message);
   }
 });
@@ -1429,6 +1439,11 @@ els.saveProductBtn.addEventListener("click", async () => {
     if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
     state.productOriginalFiles = [];
   } catch (e) {
+    if (e.message.includes("Container not found") || e.message.includes("Product not found")) {
+      alert("Wykryto nieaktualne dane (np. po restarcie aplikacji). Strona zostanie odświeżona, aby pobrać najnowsze identyfikatory.");
+      window.location.reload();
+      return;
+    }
     alert("Błąd zapisu produktu: " + e.message);
   }
 });
@@ -1514,6 +1529,11 @@ els.containerList.addEventListener("click", async (ev) => {
       await api("DELETE", `/api/containers/${id}`);
       await loadContainers();
     } catch (e) {
+      if (e.message.includes("Container not found")) {
+        alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
+        window.location.reload();
+        return;
+      }
       alert("Błąd usuwania kontenera: " + e.message);
     }
   }
@@ -1538,6 +1558,11 @@ els.containerList.addEventListener("click", async (ev) => {
       await api("DELETE", `/api/containers/${cid}/products/${pid}`);
       await loadContainers();
     } catch (e) {
+      if (e.message.includes("Container not found") || e.message.includes("Product not found")) {
+        alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
+        window.location.reload();
+        return;
+      }
       alert("Błąd usuwania produktu: " + e.message);
     }
   }
