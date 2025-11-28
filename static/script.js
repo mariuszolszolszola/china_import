@@ -669,23 +669,37 @@ function renderContainersList() {
           const pkey = encodeURIComponent(String(p.name || ""));
           const attachmentsHtml = '<div class="product-files"><div class="files attachments empty" data-pkey="' + pkey + '">Brak załączników</div></div>';
           row.innerHTML = `
-            <div class="product-main">
-              <div class="product-name"><strong>${p.name}</strong> (ilość: ${Math.max(1, num(p.quantity, 1))})</div>
-              <div class="product-meta">Cena całkowita: ${convertPrice(toUSD(num(p.totalPrice, 0), p.totalPriceCurrency, exchangeRate), exchangeRate)} | CBM: ${num(p.productCbm, 0).toFixed(3)} | Cło: ${num(p.customsDutyPercent, 0).toFixed(2)}%</div>
-            </div>
-            <div class="product-costs">
-              <div>Jednostkowa: <strong>${convertPrice(costs.pricePerUnit, exchangeRate)}</strong></div>
-              <div>Transport/szt.: <strong>${convertPrice(costs.transportPerUnit, exchangeRate)}</strong></div>
-              <div>Cło: <strong>${convertPrice(costs.dutyAmount, exchangeRate)}</strong></div>
-              <div>VAT: <strong>${convertPrice(costs.vatAmount, exchangeRate)}</strong></div>
-              <div>Dodatkowe/szt.: <strong>${convertPrice(costs.additionalPerUnit, exchangeRate)}</strong></div>
-              <div>Netto/szt.: <strong>${convertPrice(costs.pricePerUnit + costs.transportPerUnit + (costs.dutyAmount / costs.quantity) + costs.additionalPerUnit, exchangeRate)}</strong> | Razem/szt.: <strong>${convertPrice(costs.totalCostPerUnit, exchangeRate)}</strong></div>
-            </div>
-            ${attachmentsHtml}
-            <div class="product-actions">
-              <button class="btn" data-action="download-all" data-cid="${c.id}" data-pid="${p.id}">Pobierz pliki</button>
-              <button class="btn" data-action="edit-product" data-cid="${c.id}" data-pid="${p.id}">Edytuj</button>
-              <button class="btn danger" data-action="delete-product" data-cid="${c.id}" data-pid="${p.id}">Usuń</button>
+            <div class="product-content-wrapper">
+              <div class="product-main">
+                <div class="product-name"><strong>${p.name}</strong> <span style="color:#6b7280; font-weight:400">(ilość: ${Math.max(1, num(p.quantity, 1))})</span></div>
+                <div class="product-meta">
+                  Cena całk.: ${convertPrice(toUSD(num(p.totalPrice, 0), p.totalPriceCurrency, exchangeRate), exchangeRate)} |
+                  CBM: ${num(p.productCbm, 0).toFixed(3)} |
+                  Cło: ${num(p.customsDutyPercent, 0).toFixed(2)}%
+                </div>
+              </div>
+
+              <div class="product-costs">
+                <div><span>Jednostkowa</span> <strong>${convertPrice(costs.pricePerUnit, exchangeRate)}</strong></div>
+                <div><span>Transport/szt.</span> <strong>${convertPrice(costs.transportPerUnit, exchangeRate)}</strong></div>
+                <div><span>Cło/szt.</span> <strong>${convertPrice(costs.dutyAmount / costs.quantity, exchangeRate)}</strong></div>
+                <div><span>VAT/szt.</span> <strong>${convertPrice(costs.vatAmount / costs.quantity, exchangeRate)}</strong></div>
+                <div><span>Dodatkowe/szt.</span> <strong>${convertPrice(costs.additionalPerUnit, exchangeRate)}</strong></div>
+                <div class="cost-summary">
+                  <div class="summary-item"><span>Netto/szt.</span> <strong>${convertPrice(costs.pricePerUnit + costs.transportPerUnit + (costs.dutyAmount / costs.quantity) + costs.additionalPerUnit, exchangeRate)}</strong></div>
+                  <div class="summary-item"><span>Brutto/szt.</span> <strong>${convertPrice(costs.totalCostPerUnit, exchangeRate)}</strong></div>
+                </div>
+              </div>
+
+              <div class="product-attachments-wrapper">
+                ${attachmentsHtml}
+              </div>
+              
+              <div class="product-actions">
+                <button class="btn" data-action="download-all" data-cid="${c.id}" data-pid="${p.id}">Pobierz pliki</button>
+                <button class="btn" data-action="edit-product" data-cid="${c.id}" data-pid="${p.id}">Edytuj</button>
+                <button class="btn danger" data-action="delete-product" data-cid="${c.id}" data-pid="${p.id}">Usuń</button>
+              </div>
             </div>
           `;
           // Dociągnij załączniki po nazwie produktu (Drive) gdy lokalnie brak

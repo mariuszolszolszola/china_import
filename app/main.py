@@ -69,8 +69,10 @@ def _save_data(data: List[Dict[str, Any]]) -> None:
         _mem_data = [dict(item) for item in data]
 
 def _next_id() -> int:
-    # millisecond timestamp based id
-    return int(datetime.now().timestamp() * 1000)
+    # millisecond timestamp + random suffix to prevent collisions
+    ts = int(datetime.now().timestamp() * 1000)
+    # Przesuń timestamp o 1000 (3 cyfry) i dodaj losową wartość 0-999
+    return (ts * 1000) + secrets.randbelow(1000)
 
 def _calc_pickup_date(order_date: Optional[str], production_days: Optional[str]) -> Optional[str]:
     if not order_date or not production_days:
