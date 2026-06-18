@@ -10,12 +10,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+import logging
+from app.pdf_generator import generate_container_pdf
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # TODO: Basic Auth (przygotowanie)
 # from fastapi import Depends
@@ -145,12 +152,12 @@ def _get_gspread_client():
     try:
         import gspread  # type: ignore
     except Exception as e:
-        print(f"[Sheets] Import gspread failed: {e}")
+        logger.error(f"[Sheets] Import gspread failed: {e}")
         return None
 
     info = _get_service_account_info()
     if not info:
-        print("[Sheets] Service account info missing (CLIENT_EMAIL/PRIVATE_KEY not set)")
+        logger.error("[Sheets] Service account info missing (CLIENT_EMAIL/PRIVATE_KEY not set)")
         return None
 
     # Standard creation
@@ -159,7 +166,7 @@ def _get_gspread_client():
         globals()["_GSPREAD_CLIENT"] = client
         return client
     except Exception as e1:
-        print(f"[Sheets] service_account_from_dict failed: {e1}")
+        logger.error(f"[Sheets] service_account_from_dict failed: {e1}")
 
     # Fallback: Credentials.from_service_account_info
     try:
@@ -169,22 +176,30 @@ def _get_gspread_client():
         globals()["_GSPREAD_CLIENT"] = client
         return client
     except Exception as e2:
-        print(f"[Sheets] Credentials fallback failed: {e2}")
+        logger.error(f"[Sheets] Credentials fallback failed: {e2}")
 
     # Final fallback wyłączony – brak lokalnego zapisu do plików
     return None
 
 def _sheet_records(title: str):
+    logger.info(f"[Sheets] _sheet_records('{title}') called")
     client = _get_gspread_client()
     file_id = os.environ.get("FILE_ID")
-    if not client or not file_id:
+    if not client:
+        logger.error(f"[Sheets] _sheet_records('{title}'): No gspread client — cannot read sheet. Check CLIENT_EMAIL / PRIVATE_KEY in .env")
         return []
+    if not file_id:
+        logger.error(f"[Sheets] _sheet_records('{title}'): FILE_ID not set in .env — cannot open spreadsheet")
+        return []
+    logger.info(f"[Sheets] _sheet_records('{title}'): client OK, FILE_ID={file_id[:12]}...")
     try:
         sh = client.open_by_key(file_id)
         ws = sh.worksheet(title)
-        # Use header row to map to dict
-        return ws.get_all_records()
-    except Exception:
+        records = ws.get_all_records()
+        logger.info(f"[Sheets] _sheet_records('{title}'): fetched {len(records)} rows")
+        return records
+    except Exception as e:
+        logger.error(f"[Sheets] _sheet_records('{title}'): FAILED to read worksheet — {type(e).__name__}: {e}")
         return []
 
 def _truthy(v) -> bool:
@@ -298,12 +313,12 @@ def _sheet_append_row_dynamic(title: str, default_headers: List[str], record: Di
     # Diagnostyka przyczyn braku klienta / FILE_ID
     if client is None:
         info = _get_service_account_info()
-        print(f"[Sheets] Client missing; SERVICE_ACCOUNT={'OK' if info else 'MISSING'} (***REMOVED***")
+        logger.error(f"[Sheets] Client missing; SERVICE_ACCOUNT={'OK' if info else 'MISSING'} (***REMOVED***")
     if not file_id:
-        print("[Sheets] FILE_ID missing or empty")
+        logger.error("[Sheets] FILE_ID missing or empty")
 
     if not client or not file_id:
-        print(f"[Sheets] Skip append for '{title}' due to missing config")
+        logger.error(f"[Sheets] Skip append for '{title}' due to missing config")
         return False
 
     try:
@@ -311,32 +326,32 @@ def _sheet_append_row_dynamic(title: str, default_headers: List[str], record: Di
         try:
             ws = sh.worksheet(title)
         except Exception:
-            print(f"[Sheets] Worksheet '{title}' not found. Creating...")
+            logger.info(f"[Sheets] Worksheet '{title}' not found. Creating...")
             try:
                 ws = sh.add_worksheet(title=title, rows=100, cols=max(1, len(default_headers)))
             except Exception as e:
-                print(f"[Sheets] Failed to create worksheet '{title}': {e}")
+                logger.info(f"[Sheets] Failed to create worksheet '{title}': {e}")
                 return False
         headers = _sheet_ensure_headers(ws, default_headers)
         row = []
         for h in headers:
             row.append(record.get(h, ""))
         ws.append_row(row, value_input_option="USER_ENTERED")
-        print(f"[Sheets] Appended 1 row to '{title}'")
+        logger.info(f"[Sheets] Appended 1 row to '{title}'")
         return True
     except Exception as e:
-        print(f"[Sheets] Append failed for '{title}': {e}")
+        logger.error(f"[Sheets] Append failed for '{title}': {e}")
         return False
 
 def _on_created_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
     if SHEETS_SYNC_ON_WRITE != "1":
-        print("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        logger.info("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**container}
     rec.pop("id", None)
     rec.pop("products", None)
     ok = _sheet_append_row_dynamic(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, rec)
-    print(f"[Sheets] Container sync {'OK' if ok else 'FAILED'}")
+    logger.info(f"[Sheets] Container sync {'OK' if ok else 'FAILED'}")
     return ok
 
 def _col_letter(n: int) -> str:
@@ -361,7 +376,7 @@ def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, v
     file_id = os.environ.get("FILE_ID")
 
     if not client or not file_id:
-        print(f"[Sheets] Skip update for '{title}' due to missing config")
+        logger.error(f"[Sheets] Skip update for '{title}' due to missing config")
         return False
 
     try:
@@ -372,7 +387,7 @@ def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, v
         try:
             key_index = headers.index(key) + 1  # 1-based indeks kolumny
         except ValueError:
-            print(f"[Sheets] Key '{key}' not found in headers -> update aborted")
+            logger.error(f"[Sheets] Key '{key}' not found in headers -> update aborted")
             return False
 
         # Znajdź numer wiersza z wartością 'value' w kolumnie 'key'
@@ -384,17 +399,17 @@ def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, v
                 break
 
         if not target_row:
-            print(f"[Sheets] Row with {key}='{value}' not found -> update aborted")
+            logger.error(f"[Sheets] Row with {key}='{value}' not found -> update aborted")
             return False
 
         row_values = _sheet_build_row(headers, record)
         end_col = _col_letter(len(headers))
         rng = f"A{target_row}:{end_col}{target_row}"
         ws.update(rng, [row_values], value_input_option="USER_ENTERED")
-        print(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
+        logger.info(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
         return True
     except Exception as e:
-        print(f"[Sheets] Update failed for '{title}': {e}")
+        logger.error(f"[Sheets] Update failed for '{title}': {e}")
         return False
 
 def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
@@ -403,25 +418,25 @@ def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
     Obecnie dopasowanie po 'name'; w przyszłości zalecane dopasowanie po 'id' kolumnie.
     """
     if SHEETS_SYNC_ON_WRITE != "1":
-        print("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        logger.info("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**container}
     rec.pop("id", None)
     rec.pop("products", None)
     ok = _sheet_update_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "name", container.get("name", ""), rec)
-    print(f"[Sheets] Container update sync {'OK' if ok else 'FAILED'}")
+    logger.info(f"[Sheets] Container update sync {'OK' if ok else 'FAILED'}")
     return ok
 
 def _on_added_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str, Any]) -> bool:
     if SHEETS_SYNC_ON_WRITE != "1":
-        print("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        logger.info("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**product}
     rec.pop("id", None)
     rec["containerName"] = container.get("name", "")
     rec["containerId"] = container.get("id")
     ok = _sheet_append_row_dynamic(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, rec)
-    print(f"[Sheets] Product sync {'OK' if ok else 'FAILED'} (containerId={rec['containerId']})")
+    logger.info(f"[Sheets] Product sync {'OK' if ok else 'FAILED'} (containerId={rec['containerId']})")
     return ok
 
 def _sheet_update_row_by_keys(title: str, default_headers: List[str], keys_values: Dict[str, Any], record: Dict[str, Any]) -> bool:
@@ -434,7 +449,7 @@ def _sheet_update_row_by_keys(title: str, default_headers: List[str], keys_value
     file_id = os.environ.get("FILE_ID")
 
     if not client or not file_id:
-        print(f"[Sheets] Skip update for '{title}' due to missing config")
+        logger.error(f"[Sheets] Skip update for '{title}' due to missing config")
         return False
 
     try:
@@ -449,7 +464,7 @@ def _sheet_update_row_by_keys(title: str, default_headers: List[str], keys_value
             try:
                 key_indices.append(headers.index(k) + 1)
             except ValueError:
-                print(f"[Sheets] Key '{k}' not found in headers -> update aborted")
+                logger.error(f"[Sheets] Key '{k}' not found in headers -> update aborted")
                 return False
 
         # Pobierz wartości kolumn dla każdego klucza
@@ -476,17 +491,17 @@ def _sheet_update_row_by_keys(title: str, default_headers: List[str], keys_value
                 break
 
         if not target_row:
-            print(f"[Sheets] Row with keys {keys_values} not found -> update aborted")
+            logger.error(f"[Sheets] Row with keys {keys_values} not found -> update aborted")
             return False
 
         row_values = _sheet_build_row(headers, record)
         end_col = _col_letter(len(headers))
         rng = f"A{target_row}:{end_col}{target_row}"
         ws.update(rng, [row_values], value_input_option="USER_ENTERED")
-        print(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
+        logger.info(f"[Sheets] Updated 1 row in '{title}' at {target_row}")
         return True
     except Exception as e:
-        print(f"[Sheets] Update failed for '{title}': {e}")
+        logger.error(f"[Sheets] Update failed for '{title}': {e}")
         return False
 
 def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str, Any]) -> bool:
@@ -497,7 +512,7 @@ def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[s
     - Ostateczny fallback: (name)
     """
     if SHEETS_SYNC_ON_WRITE != "1":
-        print("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        logger.info("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
 
     rec = {**product}
@@ -518,10 +533,10 @@ def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[s
             continue
         ok = _sheet_update_row_by_keys(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, kv_clean, rec)
         if ok:
-            print("[Sheets] Product update sync OK")
+            logger.info("[Sheets] Product update sync OK")
             return True
 
-    print("[Sheets] Product update sync FAILED")
+    logger.info("[Sheets] Product update sync FAILED")
     return False
 
 class ProductIn(BaseModel):
@@ -532,6 +547,17 @@ class ProductIn(BaseModel):
     productCbm: str = ""
     customsDutyPercent: str = ""
     files: List[str] = Field(default_factory=list)
+
+    @field_validator('quantity', 'totalPrice', 'productCbm', 'customsDutyPercent', mode='before')
+    @classmethod
+    def validate_numeric(cls, v):
+        if not v: return v
+        try:
+            float(v)
+            return v
+        except ValueError:
+            raise ValueError(f"Wartość musi być liczbą, otrzymano: {v}")
+
 
 class Product(ProductIn):
     id: int = Field(default_factory=_next_id)
@@ -568,6 +594,16 @@ class ContainerIn(BaseModel):
     customsClearanceDone: bool = False
     deliveredToWarehouse: bool = False
     documentsInSystem: bool = False
+
+    @field_validator('orderDate', 'paymentDate', 'deliveryDate', mode='before')
+    @classmethod
+    def validate_date(cls, v):
+        if not v: return v
+        import re
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(v)):
+            raise ValueError("Data musi być w formacie YYYY-MM-DD")
+        return v
+
 
 class Container(ContainerIn):
     id: int = Field(default_factory=_next_id)
@@ -614,41 +650,61 @@ class ContainerUpdate(BaseModel):
 
 def _auto_import_from_sheets_on_start() -> None:
     # Auto-import z arkusza przy starcie aplikacji
+    logger.info("[Startup] _auto_import_from_sheets_on_start() begin")
     try:
         data = _load_data()
+        logger.info(f"[Startup] In-memory containers: {len(data)}")
         # Import kontenerów gdy brak danych
         if not data:
+            logger.info("[Startup] No containers in memory — fetching from Google Sheets...")
             cs = sheet_containers()
+            logger.info(f"[Startup] sheet_containers() returned {len(cs)} rows")
             new_data: List[Dict[str, Any]] = []
-            for rec in cs:
+            for idx, rec in enumerate(cs):
                 try:
                     c = Container(**rec).model_dump()
-                except Exception:
+                except Exception as e1:
+                    logger.warning(f"[Startup] Container row {idx} direct parse failed ({e1}), trying fallback...")
                     # Fallback przez ContainerIn
                     try:
                         c = Container(**ContainerIn(**rec).model_dump()).model_dump()
-                    except Exception:
+                    except Exception as e2:
+                        logger.error(f"[Startup] Container row {idx} fallback also failed ({e2}), skipping. Row data keys: {list(rec.keys()) if isinstance(rec, dict) else type(rec)}")
                         continue
                 # pickupDate wyliczane lokalnie
                 c["pickupDate"] = _calc_pickup_date(c.get("orderDate"), c.get("productionDays"))
                 new_data.append(c)
             if new_data:
+                logger.info(f"[Startup] Imported {len(new_data)} containers from sheet")
                 _save_data(new_data)
                 data = _load_data()
+            else:
+                logger.warning("[Startup] No valid containers parsed from sheet rows")
+        else:
+            logger.info(f"[Startup] Skipping container import — already have {len(data)} containers")
 
         # Import produktów jeśli żaden kontener nie ma produktów
         any_products = any((c.get("products") or []) for c in data)
+        logger.info(f"[Startup] any_products={any_products}, containers={len(data)}")
         if not any_products and data:
+            logger.info("[Startup] No products in containers — fetching from Google Sheets...")
             ps = sheet_products()
+            logger.info(f"[Startup] sheet_products() returned {len(ps)} rows")
             if ps:
                 by_name: Dict[str, Dict[str, Any]] = {
                     str(c.get("name", "")).strip().lower(): c for c in data
                 }
+                logger.info(f"[Startup] Container names for matching: {list(by_name.keys())}")
+                matched = 0
+                unmatched = 0
                 for rec in ps:
                     cname = str(rec.get("containerName", "")).strip().lower()
                     container = by_name.get(cname) if cname else (data[0] if data else None)
                     if not container:
+                        unmatched += 1
+                        logger.warning(f"[Startup] Product '{rec.get('name', '?')}' has containerName='{cname}' — no matching container found, skipping")
                         continue
+                    matched += 1
                     # Zbuduj payload produktu z tolerancją braków
                     payload = {
                         "name": str(rec.get("name", "")).strip(),
@@ -661,21 +717,56 @@ def _auto_import_from_sheets_on_start() -> None:
                     }
                     try:
                         p = Product(**payload).model_dump()
-                    except Exception:
+                    except Exception as ep:
+                        logger.warning(f"[Startup] Product '{payload.get('name')}' pydantic failed ({ep}), using raw dict")
                         # W skrajnych przypadkach akceptuj bez pydantic (minimalny rekord)
                         p = {"id": _next_id(), **payload}
                     products = container.get("products", [])
                     products.append(p)
                     container["products"] = products
+                logger.info(f"[Startup] Products: {matched} matched, {unmatched} unmatched")
                 _save_data(data)
+            else:
+                logger.warning("[Startup] sheet_products() returned 0 rows — no products to import")
+        else:
+            if any_products:
+                logger.info("[Startup] Skipping product import — containers already have products")
+            elif not data:
+                logger.warning("[Startup] No containers loaded — cannot import products")
     except Exception as e:
-        try:
-            print(f"[Startup] Auto import from sheets failed: {e}")
-        except Exception:
-            pass
+        logger.error(f"[Startup] Auto import from sheets FAILED: {type(e).__name__}: {e}", exc_info=True)
+    logger.info("[Startup] _auto_import_from_sheets_on_start() done")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- Startup config diagnostic ---
+    _load_env_from_file()
+    logger.info("=" * 60)
+    logger.info("[Config] Import Tracker — startup diagnostic")
+    logger.info(f"[Config] FILE_ID          = {'SET (' + os.environ.get('FILE_ID', '')[:12] + '...)' if os.environ.get('FILE_ID') else 'MISSING ⚠️'}")
+    logger.info(f"[Config] CLIENT_EMAIL      = {'SET (' + os.environ.get('CLIENT_EMAIL', '')[:20] + '...)' if os.environ.get('CLIENT_EMAIL') else 'MISSING ⚠️'}")
+    logger.info(f"[Config] PRIVATE_KEY       = {'SET (' + str(len(os.environ.get('PRIVATE_KEY', ''))) + ' chars)' if os.environ.get('PRIVATE_KEY') else 'MISSING ⚠️'}")
+    logger.info(f"[Config] FOLDER_ID         = {'SET (' + os.environ.get('FOLDER_ID', '') + ')' if os.environ.get('FOLDER_ID') else 'NOT SET (optional)'}")
+    logger.info(f"[Config] OAUTH_CLIENT_ID   = {'SET' if os.environ.get('OAUTH_CLIENT_ID') else 'MISSING ⚠️'}")
+    logger.info(f"[Config] OAUTH_REFRESH_TOKEN = {'SET' if os.environ.get('OAUTH_REFRESH_TOKEN') else 'MISSING ⚠️'}")
+    logger.info(f"[Config] SHEETS_SYNC       = {SHEETS_SYNC_ON_WRITE}")
+    try:
+        import gspread  # type: ignore
+        logger.info(f"[Config] gspread           = INSTALLED (v{getattr(gspread, '__version__', '?')})")
+    except ImportError:
+        logger.error("[Config] gspread           = NOT INSTALLED ⚠️ — pip install gspread")
+    try:
+        from google.oauth2.service_account import Credentials  # type: ignore
+        logger.info("[Config] google-auth       = INSTALLED")
+    except ImportError:
+        logger.error("[Config] google-auth       = NOT INSTALLED ⚠️ — pip install google-auth")
+    try:
+        from googleapiclient.discovery import build  # type: ignore
+        logger.info("[Config] google-api-python = INSTALLED")
+    except ImportError:
+        logger.error("[Config] google-api-python = NOT INSTALLED ⚠️ — pip install google-api-python-client")
+    logger.info("=" * 60)
+    # --- End diagnostic ---
     _auto_import_from_sheets_on_start()
     yield
 
@@ -815,6 +906,16 @@ def api_version() -> Dict[str, Any]:
     }
 
 # Upload plików produktów → Google Drive
+
+@app.get("/api/containers/{container_id}/report.pdf")
+def get_container_report_pdf(container_id: int):
+    c = next((x for x in _mem_data if x["id"] == container_id), None)
+    if not c:
+        raise HTTPException(status_code=404, detail="Container not found")
+    
+    pdf_bytes = generate_container_pdf(c)
+    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="raport_{container_id}.pdf"'})
+
 @app.post("/api/files/upload")
 async def upload_product_file(productName: str = Form(...), file: UploadFile = File(...)):
     """
@@ -888,7 +989,7 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
                         if parents:
                             root_id = parents[0]
         except Exception as re_err:
-            print(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
+            logger.error(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
         if not root_id:
             root_id = "root"
         # Weryfikacja dostępu do folderu root_id dla użytkownika OAuth; w razie braku dostępu – fallback do 'root'
@@ -902,10 +1003,10 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
                 err_msg = he.content.decode("utf-8") if isinstance(he.content, (bytes, bytearray)) else str(he.content)
             except Exception:
                 err_msg = str(he)
-            print(f"[Drive] Root folder '{root_id}' niedostępny dla konta OAuth – fallback do 'root': {err_msg}")
+            logger.info(f"[Drive] Root folder '{root_id}' niedostępny dla konta OAuth – fallback do 'root': {err_msg}")
             root_id = "root"
         except Exception as ge:
-            print(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
+            logger.error(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
             root_id = "root"
 
         # Znajdź/utwórz podfolder na nazwę produktu
@@ -946,7 +1047,7 @@ async def upload_product_file(productName: str = Form(...), file: UploadFile = F
                 perm_body = {"type": "anyone", "role": "reader"}
                 service.permissions().create(fileId=file_id, body=perm_body).execute()
         except Exception as pe:
-            print(f"[Drive] Permission set failed (ignored): {pe}")
+            logger.error(f"[Drive] Permission set failed (ignored): {pe}")
 
         # URL do pobrania
         url = web_content or (f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else web_view or "")
@@ -1043,7 +1144,7 @@ def list_containers() -> List[Container]:
     return data
 
 @app.post("/api/containers", status_code=201)
-def create_container(payload: ContainerIn, request: Request) -> Container:
+def create_container(payload: ContainerIn, request: Request, background_tasks: BackgroundTasks) -> Container:
     c = Container(**payload.model_dump())
     c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
     data = _load_data()
@@ -1054,13 +1155,13 @@ def create_container(payload: ContainerIn, request: Request) -> Container:
     try:
         src = (request.query_params.get("source") or "").strip().lower()
         if src != "sheet":
-            _on_created_container_sync_to_sheet(c.model_dump())
+            background_tasks.add_task(_on_created_container_sync_to_sheet, c.model_dump())
     except Exception:
         pass
     return c.model_dump()
 
 @app.put("/api/containers/{container_id}")
-def update_container(container_id: int, payload: ContainerUpdate) -> Container:
+def update_container(container_id: int, payload: ContainerUpdate, background_tasks: BackgroundTasks) -> Container:
     data = _load_data()
     for i, item in enumerate(data):
         if int(item.get("id")) == container_id:
@@ -1077,7 +1178,7 @@ def update_container(container_id: int, payload: ContainerUpdate) -> Container:
             _save_data(data)
             # write-through do Google Sheets (ignoruj błędy)
             try:
-                _on_updated_container_sync_to_sheet(updated)
+                background_tasks.add_task(_on_updated_container_sync_to_sheet, updated)
             except Exception:
                 pass
             return updated
@@ -1173,7 +1274,7 @@ def delete_container(container_id: int):
     return
 
 @app.post("/api/containers/{container_id}/products", status_code=201)
-def add_product(container_id: int, payload: ProductIn, request: Request) -> Product:
+def add_product(container_id: int, payload: ProductIn, request: Request, background_tasks: BackgroundTasks) -> Product:
     """
     Dodawanie produktu:
     - Normalnie (bez parametru source=sheet): zawsze tworzy nowy wpis i appenduje do arkusza.
@@ -1216,14 +1317,14 @@ def add_product(container_id: int, payload: ProductIn, request: Request) -> Prod
             # zapis do Google Sheets (append); ignoruj błędy
             try:
                 if src != "sheet":
-                    _on_added_product_sync_to_sheet(item, p.model_dump())
+                    background_tasks.add_task(_on_added_product_sync_to_sheet, item, p.model_dump())
             except Exception:
                 pass
             return p.model_dump()
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.put("/api/containers/{container_id}/products/{product_id}")
-def update_product(container_id: int, product_id: int, payload: ProductIn) -> Product:
+def update_product(container_id: int, product_id: int, payload: ProductIn, background_tasks: BackgroundTasks) -> Product:
     data = _load_data()
     for i, item in enumerate(data):
         if int(item.get("id")) == container_id:
@@ -1238,7 +1339,7 @@ def update_product(container_id: int, product_id: int, payload: ProductIn) -> Pr
                     _save_data(data)
                     # write-through do Google Sheets (ignoruj błędy)
                     try:
-                        _on_updated_product_sync_to_sheet(item, new_prod)
+                        background_tasks.add_task(_on_updated_product_sync_to_sheet, item, new_prod)
                     except Exception:
                         pass
                     return new_prod
@@ -1263,14 +1364,18 @@ def delete_product(container_id: int, product_id: int):
 # Sheets API
 @app.get("/api/sheets/containers")
 def sheet_containers() -> List[Dict[str, Any]]:
+    logger.info(f"[API] GET /api/sheets/containers — reading sheet '{SHEET_CONTAINERS_TITLE}'")
     recs = _sheet_records(SHEET_CONTAINERS_TITLE)
     mapped = [_map_sheet_container(r) for r in recs if isinstance(r, dict) and any(str(v).strip() for v in r.values())]
+    logger.info(f"[API] /api/sheets/containers: raw={len(recs)} → mapped={len(mapped)}")
     return mapped
 
 @app.get("/api/sheets/products")
 def sheet_products() -> List[Dict[str, Any]]:
+    logger.info(f"[API] GET /api/sheets/products — reading sheet '{SHEET_PRODUCTS_TITLE}'")
     recs = _sheet_records(SHEET_PRODUCTS_TITLE)
     mapped = [_map_sheet_product(r) for r in recs if isinstance(r, dict) and any(str(v).strip() for v in r.values())]
+    logger.info(f"[API] /api/sheets/products: raw={len(recs)} → mapped={len(mapped)}")
     return mapped
 
 # Lista plików dla produktu (folder o nazwie produktu w Google Drive)
@@ -1337,6 +1442,7 @@ def drive_product_files(name: str, rootId: Optional[str] = None) -> Dict[str, An
             "rootId": root_id,
         }
     except Exception as e:
+        logger.error(f"[Drive] Wystąpił błąd pobierania plików z Google Drive dla produktu '{name}'. Czy dostęp wygasł? Szczegóły: {e}")
         raise HTTPException(status_code=500, detail=f"Drive product-files failed: {e}")
 
 # Fallback na index.html
@@ -1405,14 +1511,14 @@ def _drive_resolve_root_id(service, env_root_id: Optional[str], file_id_sheet: O
                     if parents:
                         root_id = parents[0]
     except Exception as re_err:
-        print(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
+        logger.error(f"[Drive] Resolve parent of FILE_ID failed: {re_err}")
     if not root_id:
         root_id = "root"
     try:
         if root_id and str(root_id).lower() != "root":
             service.files().get(fileId=root_id, fields="id").execute()
     except Exception as ge:
-        print(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
+        logger.error(f"[Drive] Root folder check failed ({ge}) – fallback do 'root'")
         root_id = "root"
     return root_id
 

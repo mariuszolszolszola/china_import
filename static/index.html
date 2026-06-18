@@ -16,7 +16,9 @@
         <h1 class="title">Zarządzanie Importem z Chin</h1>
         <p class="subtitle">System śledzenia kontenerów i produktów</p>
       </div>
-      <div class="header-right">
+      <div class="header-right" style="display: flex; gap: 8px; align-items: center;">
+        <button id="darkModeToggle" class="btn small icon-btn" title="Przełącz motyw" aria-label="Przełącz motyw">🌙</button>
+        <button id="importFromDriveBtn" class="btn secondary">Importuj z Drive</button>
         <button id="toggleContainerFormBtn" class="btn primary">Dodaj Kontener</button>
       </div>
     </header>
@@ -27,11 +29,11 @@
       <div class="grid grid-3">
         <div class="form-group col-span-2">
           <label for="cName">Nazwa Kontenera *</label>
-          <input type="text" id="cName" placeholder="np. Kontener 2024-11">
+          <input type="text" id="cName" placeholder="np. Kontener 2024-11" required>
         </div>
         <div class="form-group">
           <label for="cExchangeRate">Kurs USD *</label>
-          <input type="number" step="0.01" id="cExchangeRate" placeholder="4.15" value="4.0">
+          <input type="number" step="0.01" id="cExchangeRate" placeholder="4.15" value="4.0" min="0.01" required>
         </div>
       </div>
       <h3>Wczytaj z arkusza</h3>
@@ -50,7 +52,7 @@
       <div class="grid grid-4">
         <div class="form-group">
           <label for="cOrderDate">Data Zamówienia *</label>
-          <input type="date" id="cOrderDate">
+          <input type="date" id="cOrderDate" required>
         </div>
         <div class="form-group">
           <label for="cPaymentDate">Data Opłacenia</label>
@@ -58,7 +60,7 @@
         </div>
         <div class="form-group">
           <label for="cProductionDays">Czas Produkcji (dni) *</label>
-          <input type="number" id="cProductionDays" placeholder="30">
+          <input type="number" id="cProductionDays" placeholder="30" min="0" required>
         </div>
         <div class="form-group">
           <label for="cDeliveryDate">Data Dostawy</label>
@@ -71,7 +73,7 @@
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cContainerCost">Koszt kontenera</label>
-            <input type="number" step="0.01" id="cContainerCost" placeholder="0">
+            <input type="number" step="0.01" id="cContainerCost" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -82,7 +84,7 @@
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cCustomsClearanceCost">Koszt odprawy</label>
-            <input type="number" step="0.01" id="cCustomsClearanceCost" placeholder="0">
+            <input type="number" step="0.01" id="cCustomsClearanceCost" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -93,7 +95,7 @@
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cTransportChinaCost">Transport Chiny → EU</label>
-            <input type="number" step="0.01" id="cTransportChinaCost" placeholder="0">
+            <input type="number" step="0.01" id="cTransportChinaCost" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -104,7 +106,7 @@
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cTransportPolandCost">Transport w Polsce</label>
-            <input type="number" step="0.01" id="cTransportPolandCost" placeholder="0">
+            <input type="number" step="0.01" id="cTransportPolandCost" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -115,7 +117,7 @@
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cInsuranceCost">Ubezpieczenie</label>
-            <input type="number" step="0.01" id="cInsuranceCost" placeholder="0">
+            <input type="number" step="0.01" id="cInsuranceCost" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -125,13 +127,13 @@
 
         <div class="form-group">
           <label for="cTotalTransportCbm">Łączne CBM transportu</label>
-          <input type="number" step="0.001" id="cTotalTransportCbm" placeholder="1">
+          <input type="number" step="0.001" id="cTotalTransportCbm" placeholder="1" min="0.001">
         </div>
 
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="cAdditionalCosts">Dodatkowe koszty</label>
-            <input type="number" step="0.01" id="cAdditionalCosts" placeholder="0">
+            <input type="number" step="0.01" id="cAdditionalCosts" placeholder="0" min="0">
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -158,17 +160,6 @@
           <input type="checkbox" id="cDocumentsInSystem">
           Dokumenty w systemie
         </label>
-      <h3>Wczytaj z arkusza</h3>
-      <div class="grid grid-3">
-        <div class="form-group col-span-2">
-          <label for="sheetProductSelect">Produkt z arkusza</label>
-          <select id="sheetProductSelect"></select>
-        </div>
-        <div class="form-group">
-          <label>&nbsp;</label>
-          <button id="loadProductFromSheetBtn" class="btn">Załaduj</button>
-        </div>
-      </div>
       </div>
 
       <div class="form-actions">
@@ -180,27 +171,39 @@
     <section id="productFormSection" class="card hidden">
       <h2 id="productFormTitle">Nowy Produkt</h2>
 
+      <h3>Wczytaj z arkusza</h3>
+      <div class="grid grid-3">
+        <div class="form-group col-span-2">
+          <label for="sheetProductSelect">Produkt z arkusza</label>
+          <select id="sheetProductSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="loadProductFromSheetBtn" class="btn">Załaduj</button>
+        </div>
+      </div>
+
       <div class="grid grid-3">
         <div class="form-group">
           <label for="productContainerSelect">Kontener *</label>
-          <select id="productContainerSelect"></select>
+          <select id="productContainerSelect" required></select>
         </div>
         <div class="form-group col-span-2">
           <label for="pName">Nazwa produktu *</label>
-          <input type="text" id="pName" placeholder="np. Produkt A">
+          <input type="text" id="pName" placeholder="np. Produkt A" required>
         </div>
       </div>
 
       <div class="grid grid-3">
         <div class="form-group">
           <label for="pQuantity">Ilość *</label>
-          <input type="number" id="pQuantity" placeholder="1">
+          <input type="number" id="pQuantity" placeholder="1" min="1" required>
         </div>
 
         <div class="form-group currency-row">
           <div class="flex-1">
             <label for="pTotalPrice">Cena całkowita *</label>
-            <input type="number" step="0.01" id="pTotalPrice" placeholder="0">
+            <input type="number" step="0.01" id="pTotalPrice" placeholder="0" min="0" required>
           </div>
           <div class="currency-toggle">
             <label>Waluta</label>
@@ -210,12 +213,12 @@
 
         <div class="form-group">
           <label for="pProductCbm">CBM produktu</label>
-          <input type="number" step="0.001" id="pProductCbm" placeholder="0">
+          <input type="number" step="0.001" id="pProductCbm" placeholder="0" min="0">
         </div>
 
         <div class="form-group">
           <label for="pCustomsDutyPercent">% cła</label>
-          <input type="number" step="0.01" id="pCustomsDutyPercent" placeholder="0">
+          <input type="number" step="0.01" id="pCustomsDutyPercent" placeholder="0" min="0">
         </div>
       </div>
 
@@ -289,6 +292,40 @@
     </section>
   </div>
     <div id="versionBadge" class="version-badge hidden" title="Wersja aplikacji"></div>
-  <script defer src="/static/script.js"></script>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Global Loader -->
+  <div id="globalLoader" class="global-loader hidden">
+    <div class="spinner"></div>
+  </div>
+
+  <!-- Google Drive Import Modal -->
+  <div id="importModal" class="global-loader hidden">
+    <div class="card" style="width: 95%; max-width: 650px; margin: auto; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow-lg);">
+      <div style="padding: 20px 20px 10px 20px;">
+        <h2 style="margin: 0 0 6px 0; font-size: 1.5rem; display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 1.8rem;">📁</span> Import z Google Drive
+        </h2>
+        <p class="subtitle" style="margin: 0; font-size: 0.9rem;">
+          Zaznacz foldery kontenerów oraz produktów, które chcesz zaimportować:
+        </p>
+      </div>
+      
+      <div style="padding: 10px 20px; flex: 1; overflow-y: auto;">
+        <div id="importTree" class="import-tree">
+          <!-- Renderowane dynamicznie -->
+        </div>
+      </div>
+      
+      <div class="form-actions" style="padding: 15px 20px 20px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; margin-top: 0; background: rgba(0, 0, 0, 0.05);">
+        <button id="importCloseBtn" class="btn">Anuluj</button>
+        <button id="importRunBtn" class="btn success">Uruchom Import</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/main.js"></script>
 </body>
 </html>

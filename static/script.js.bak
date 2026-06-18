@@ -2,7 +2,7 @@
 "use strict";
 
 /* Stan aplikacji */
-const state = {
+const _rawState = {
   containers: [],
   displayCurrency: "PLN",
   showContainerForm: false,
@@ -10,16 +10,24 @@ const state = {
   editingContainerId: null,
   editingProductId: null,
   selectedContainerId: null,
-  expanded: {}, // { [containerId]: boolean }
+  expanded: {},
   sheetContainers: [],
   sheetProducts: [],
   productOriginalFiles: [],
   filterMonth: null,
   isSyncingFromSheet: false,
   isSyncingProducts: false,
-  // Cache linków do załączników z Google Drive wg nazwy produktu
   productFilesCache: {},
 };
+
+// State modification wrapper for better stability
+const state = new Proxy(_rawState, {
+  set(target, prop, value) {
+    // Optionally log or validate state changes here
+    target[prop] = value;
+    return true;
+  }
+});
 
 /* Elementy DOM */
 const els = {
@@ -92,15 +100,72 @@ const els = {
    importCloseBtn: document.getElementById("importCloseBtn"),
   };
 
+
+/* UI Utilities (Toasts, Loaders, Dark Mode) */
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  
+  // Trigger animation
+  requestAnimationFrame(() => toast.classList.add('show'));
+  
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
+function showLoader() {
+  const loader = document.getElementById('globalLoader');
+  if (loader) loader.classList.remove('hidden');
+}
+
+function hideLoader() {
+  const loader = document.getElementById('globalLoader');
+  if (loader) loader.classList.add('hidden');
+}
+
+function initDarkMode() {
+  const toggleBtn = document.getElementById('darkModeToggle');
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const savedTheme = localStorage.getItem('theme');
+  const isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+  
+  if (isDark) document.documentElement.setAttribute('data-theme', 'dark');
+  
+  if (toggleBtn) {
+    toggleBtn.textContent = isDark ? '☀️' : '🌙';
+    toggleBtn.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme');
+      if (current === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('theme', 'light');
+        toggleBtn.textContent = '🌙';
+      } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+        toggleBtn.textContent = '☀️';
+      }
+    });
+  }
+}
+document.addEventListener('DOMContentLoaded', initDarkMode);
+
+
 /* Narzędzia API */
-async function api(method, url, body) {
-  const opts = { method, headers: { "Content-Type": "application/json" } };
+async function api(method, url, body, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  
+  const opts = { method, headers: { "Content-Type": "application/json" }, signal: controller.signal };
   if (body !== undefined) opts.body = JSON.stringify(body);
 
-  // Mutacje wymagają Basic Auth (POST/PUT/DELETE); GET pozostaje publiczny zgodnie z backendem
   const isMutate = String(method).toUpperCase() !== "GET";
 
-  // Helper: zbuduj nagłówek Authorization (bez zapisu lokalnie – wyłącznie w pamięci)
   const authHeader = () => {
     try {
       if (state && state.auth && state.auth.username != null && state.auth.password != null) {
@@ -110,51 +175,56 @@ async function api(method, url, body) {
     return null;
   };
 
-  // Dołącz Authorization dla mutacji, jeśli mamy poświadczenia w pamięci
   if (isMutate) {
     const ah = authHeader();
     if (ah) opts.headers["Authorization"] = ah;
   }
 
-  // Diagnostyka
   try {
-    console.log("[API] Request", { method, url, body, headers: opts.headers });
-  } catch (_){}
+    let res = await fetch(url, opts);
+    clearTimeout(id);
 
-  // Wykonaj żądanie
-  let res = await fetch(url, opts);
-
-  // Jeśli 401 przy mutacji – poproś o login/hasło i spróbuj raz jeszcze
-  if (res.status === 401 && isMutate) {
-    const u = prompt("Login (Basic Auth):") || "";
-    const p = prompt("Hasło (Basic Auth):") || "";
-    if (u && p) {
-      state.auth = { username: u, password: p }; // tylko w pamięci
-      const ah2 = authHeader();
-      if (ah2) {
-        opts.headers["Authorization"] = ah2;
-        try { console.log("[API] Retrying with auth", { method, url }); } catch (_){}
-        res = await fetch(url, opts);
+    if (res.status === 401 && isMutate) {
+      const u = prompt("Login (Basic Auth):") || "";
+      const p = prompt("Hasło (Basic Auth):") || "";
+      if (u && p) {
+        state.auth = { username: u, password: p };
+        const ah2 = authHeader();
+        if (ah2) {
+          opts.headers["Authorization"] = ah2;
+          res = await fetch(url, opts);
+        }
       }
     }
-  }
 
-  if (!res.ok) {
-    let msg = "Request failed";
-    try { const data = await res.json(); msg = data?.detail || JSON.stringify(data); } catch (_){}
-    try { console.error("[API] Error", { method, url, status: res.status, message: msg }); } catch (_){}
-    throw new Error(msg);
+    if (!res.ok) {
+      let msg = "Wystąpił błąd komunikacji z serwerem.";
+      try { const data = await res.json(); msg = data?.detail || JSON.stringify(data); } catch (_){}
+      if (isMutate) showToast(msg, 'error');
+      throw new Error(msg);
+    }
+    
+    if (res.status === 204) return null;
+    return res.json();
+  } catch (err) {
+    clearTimeout(id);
+    if (err.name === 'AbortError') {
+      const msg = "Przekroczono czas oczekiwania na odpowiedź serwera (timeout).";
+      if (isMutate) showToast(msg, 'error');
+      throw new Error(msg);
+    }
+    if (isMutate && !err.message.includes('Wystąpił błąd')) showToast(err.message, 'error');
+    throw err;
   }
-  try { console.log("[API] Success", { method, url, status: res.status }); } catch (_){}
-  if (res.status === 204) return null;
-  return res.json();
 }
+
 
 async function loadContainers() {
   const data = await api("GET", "/api/containers");
   state.containers = Array.isArray(data) ? data : [];
   renderProductContainerSelect();
   renderContainersList();
+  renderProductsList();
 }
 
 /* Pomocnicze */

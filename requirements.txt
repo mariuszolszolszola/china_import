@@ -7,3 +7,5 @@ google-auth==2.35.0
 python-multipart
 # Google Drive API client
 google-api-python-client
+# PDF Generation dependency
+reportlab
