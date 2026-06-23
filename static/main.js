@@ -218,30 +218,30 @@ if (refreshProductsBtnEl) {
 const productsListEl = document.getElementById("productsList");
 if (productsListEl) {
   productsListEl.addEventListener("click", async (ev) => {
-    const target = ev.target;
-    if (!(target instanceof HTMLElement)) return;
+    const target = ev.target instanceof HTMLElement ? ev.target.closest("[data-action]") : null;
+    if (!target) return;
     const action = target.getAttribute("data-action");
     if (!action) return;
 
     if (action === "edit-product") {
-      const cid = parseInt(target.getAttribute("data-cid"), 10);
-      const pid = parseInt(target.getAttribute("data-pid"), 10);
-      const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
-      const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+      const cidStr = target.getAttribute("data-cid");
+      const pidStr = target.getAttribute("data-pid");
+      const c = state.containers.find((x) => String(x.id) === cidStr);
+      const p = c?.products?.find((x) => String(x.id) === pidStr);
       if (!c || !p) return;
-      state.editingProductId = pid;
-      populateProductForm(cid, p);
+      state.editingProductId = p.id;
+      populateProductForm(c.id, p);
       state.showProductForm = true;
       els.productFormSection.classList.remove("hidden");
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
     if (action === "delete-product") {
-      const cid = parseInt(target.getAttribute("data-cid"), 10);
-      const pid = parseInt(target.getAttribute("data-pid"), 10);
+      const cidStr = target.getAttribute("data-cid");
+      const pidStr = target.getAttribute("data-pid");
       if (!confirm("Czy na pewno chcesz usunąć ten produkt?")) return;
       try {
-        await api("DELETE", `/api/containers/${cid}/products/${pid}`);
+        await api("DELETE", `/api/containers/${cidStr}/products/${pidStr}`);
         await initTheme();
         await loadContainers();
         renderProductsList();
@@ -569,8 +569,9 @@ els.refreshBtn.addEventListener("click", async () => {
 
 /* Zdarzenia na liście (delegacja) */
 els.containerList.addEventListener("click", async (ev) => {
-  const target = ev.target;
-  if (!(target instanceof HTMLElement)) return;
+  // Użyj closest() aby obsłużyć kliknięcia w elementy wewnątrz przycisków
+  const target = ev.target instanceof HTMLElement ? ev.target.closest("[data-action]") : null;
+  if (!target) return;
   const action = target.getAttribute("data-action");
   if (!action) return;
 
@@ -582,16 +583,17 @@ els.containerList.addEventListener("click", async (ev) => {
     return;
   }
   if (action === "toggle-expand") {
-    const id = parseInt(target.getAttribute("data-id"), 10);
-    state.expanded[id] = !state.expanded[id];
+    // Użyj string ID do mapy expanded (unikamy utraty precyzji parseInt dla dużych ID)
+    const idStr = target.getAttribute("data-id");
+    state.expanded[idStr] = !state.expanded[idStr];
     renderContainersList();
   }
 
   if (action === "edit-container") {
-    const id = parseInt(target.getAttribute("data-id"), 10);
-    const c = state.containers.find((x) => parseInt(x.id, 10) === id);
+    const idStr = target.getAttribute("data-id");
+    const c = state.containers.find((x) => String(x.id) === idStr);
     if (!c) return;
-    state.editingContainerId = id;
+    state.editingContainerId = c.id;
     populateContainerForm(c);
     state.showContainerForm = true;
     els.containerFormSection.classList.remove("hidden");
@@ -599,10 +601,10 @@ els.containerList.addEventListener("click", async (ev) => {
   }
 
   if (action === "delete-container") {
-    const id = parseInt(target.getAttribute("data-id"), 10);
+    const idStr = target.getAttribute("data-id");
     if (!confirm("Czy na pewno chcesz usunąć ten kontener wraz z wszystkimi produktami?")) return;
     try {
-      await api("DELETE", `/api/containers/${id}`);
+      await api("DELETE", `/api/containers/${idStr}`);
       await initTheme();
       await loadContainers();
     } catch (e) {
@@ -616,23 +618,23 @@ els.containerList.addEventListener("click", async (ev) => {
   }
 
   if (action === "edit-product") {
-    const cid = parseInt(target.getAttribute("data-cid"), 10);
-    const pid = parseInt(target.getAttribute("data-pid"), 10);
-    const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
-    const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+    const cidStr = target.getAttribute("data-cid");
+    const pidStr = target.getAttribute("data-pid");
+    const c = state.containers.find((x) => String(x.id) === cidStr);
+    const p = c?.products?.find((x) => String(x.id) === pidStr);
     if (!c || !p) return;
-    state.editingProductId = pid;
-    populateProductForm(cid, p);
+    state.editingProductId = p.id;
+    populateProductForm(c.id, p);
     state.showProductForm = true;
     els.productFormSection.classList.remove("hidden");
   }
 
   if (action === "delete-product") {
-    const cid = parseInt(target.getAttribute("data-cid"), 10);
-    const pid = parseInt(target.getAttribute("data-pid"), 10);
+    const cidStr = target.getAttribute("data-cid");
+    const pidStr = target.getAttribute("data-pid");
     if (!confirm("Czy na pewno chcesz usunąć ten produkt?")) return;
     try {
-      await api("DELETE", `/api/containers/${cid}/products/${pid}`);
+      await api("DELETE", `/api/containers/${cidStr}/products/${pidStr}`);
       await initTheme();
       await loadContainers();
     } catch (e) {
@@ -647,15 +649,15 @@ els.containerList.addEventListener("click", async (ev) => {
 });
 
 els.containerList.addEventListener("change", async (ev) => {
-  const target = ev.target;
-  if (!(target instanceof HTMLElement)) return;
+  const target = ev.target instanceof HTMLElement ? ev.target.closest("[data-action]") : null;
+  if (!target) return;
   const action = target.getAttribute("data-action");
   if (action !== "toggle-status") return;
-  const id = parseInt(target.getAttribute("data-id"), 10);
+  const idStr = target.getAttribute("data-id");
   const field = target.getAttribute("data-field");
   const checked = !!(target instanceof HTMLInputElement ? target.checked : false);
   try {
-    await api("PUT", `/api/containers/${id}`, { [field]: checked });
+    await api("PUT", `/api/containers/${idStr}`, { [field]: checked });
     await initTheme();
     await loadContainers();
   } catch (e) {

@@ -35,7 +35,7 @@ export function renderContainersList() {
     const totals = calculateContainerTotals(c);
     const exchangeRate = num(c.exchangeRate, 4.0);
     const statusClass = getStatusClass(c);
-    const expanded = !!state.expanded[c.id];
+    const expanded = !!state.expanded[String(c.id)];
 
     const card = document.createElement("div");
     card.className = `container-card card ${statusClass}`;
