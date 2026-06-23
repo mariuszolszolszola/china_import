@@ -1404,7 +1404,7 @@ def sheets_append_test(target: str = "containers") -> Dict[str, Any]:
         return {"ok": ok, "target": "containers"}
 
 @app.delete("/api/containers/{container_id}", status_code=204)
-def delete_container(container_id: str, background_tasks: BackgroundTasks):
+def delete_container(container_id: str, request: Request, background_tasks: BackgroundTasks):
     data = _load_data()
     deleted_container = None
     new_data = []
@@ -1418,7 +1418,8 @@ def delete_container(container_id: str, background_tasks: BackgroundTasks):
     _save_data(new_data)
     # Usuń wiersz kontenera (i powiązanych produktów) z Google Sheets
     try:
-        if deleted_container:
+        src = (request.query_params.get("source") or "").strip().lower()
+        if deleted_container and src != "sheet":
             background_tasks.add_task(_on_deleted_container_sync_to_sheet, deleted_container)
     except Exception:
         pass
@@ -1501,7 +1502,7 @@ def update_product(container_id: str, product_id: str, payload: ProductIn, backg
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.delete("/api/containers/{container_id}/products/{product_id}", status_code=204)
-def delete_product(container_id: str, product_id: str, background_tasks: BackgroundTasks):
+def delete_product(container_id: str, product_id: str, request: Request, background_tasks: BackgroundTasks):
     data = _load_data()
     for i, item in enumerate(data):
         if str(item.get("id")) == container_id:
@@ -1520,7 +1521,8 @@ def delete_product(container_id: str, product_id: str, background_tasks: Backgro
             _save_data(data)
             # Usuń wiersz produktu z Google Sheets
             try:
-                if deleted_product:
+                src = (request.query_params.get("source") or "").strip().lower()
+                if deleted_product and src != "sheet":
                     container_name = item.get("name", "")
                     background_tasks.add_task(_on_deleted_product_sync_to_sheet, container_name, deleted_product)
             except Exception:
