@@ -1,15 +1,18 @@
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app, _mem_data, ContainerIn, ProductIn
+from app.main import app, _mem_data, _data_lock, ContainerIn, ProductIn
 
 client = TestClient(app)
 
-# Helper function to clear memory before each test
+# Helper function to clear memory before AND after each test
+# Uses lock to ensure thread-safe cleanup
 @pytest.fixture(autouse=True)
 def clear_memory():
-    _mem_data.clear()
+    with _data_lock:
+        _mem_data.clear()
     yield
-    _mem_data.clear()
+    with _data_lock:
+        _mem_data.clear()
 
 def test_get_containers_empty():
     response = client.get("/api/containers")
@@ -61,14 +64,15 @@ def test_pydantic_container_date_validation():
 
 def test_create_product_validation():
     # First create a container directly in memory
-    _mem_data.append({
-        "id": 1,
-        "name": "Container 1",
-        "orderDate": "2025-01-01",
-        "productionDays": "30",
-        "exchangeRate": "4.0",
-        "products": []
-    })
+    with _data_lock:
+        _mem_data.append({
+            "id": 1,
+            "name": "Container 1",
+            "orderDate": "2025-01-01",
+            "productionDays": "30",
+            "exchangeRate": "4.0",
+            "products": []
+        })
     
     # Add a product with invalid quantity
     payload = {
@@ -78,6 +82,85 @@ def test_create_product_validation():
     }
     response = client.post("/api/containers/1/products", json=payload, auth=("admin", "admin"))
     assert response.status_code == 422
+
+def test_delete_container():
+    """Test: usunięcie kontenera — kontener nie powinien wracać po ponownym GET."""
+    payload = {
+        "name": "Container to Delete",
+        "orderDate": "2025-06-01",
+        "productionDays": "30",
+        "exchangeRate": "4.0"
+    }
+    # Utwórz kontener
+    create_resp = client.post("/api/containers", json=payload, auth=("admin", "admin"))
+    if create_resp.status_code == 401:
+        pytest.skip("Auth required but credentials not matching")
+    assert create_resp.status_code == 201
+    container_id = create_resp.json()["id"]
+
+    # Sprawdź, że kontener istnieje
+    list_resp = client.get("/api/containers")
+    assert list_resp.status_code == 200
+    assert any(c["id"] == container_id for c in list_resp.json())
+
+    # Usuń kontener
+    del_resp = client.delete(f"/api/containers/{container_id}", auth=("admin", "admin"))
+    if del_resp.status_code == 401:
+        pytest.skip("Auth required but credentials not matching")
+    assert del_resp.status_code == 204
+
+    # Sprawdź, że kontener NIE wrócił
+    list_resp2 = client.get("/api/containers")
+    assert list_resp2.status_code == 200
+    assert not any(c["id"] == container_id for c in list_resp2.json()), \
+        "Kontener powinien być usunięty, ale nadal pojawia się w /api/containers"
+
+def test_delete_product():
+    """Test: usunięcie produktu — produkt nie powinien wracać po ponownym GET."""
+    # Utwórz kontener przez API (a nie bezpośrednio w pamięci) aby uniknąć problemów z kopiami
+    container_payload = {
+        "name": "Container for Product Delete Test",
+        "orderDate": "2025-06-01",
+        "productionDays": "30",
+        "exchangeRate": "4.0"
+    }
+    create_c = client.post("/api/containers", json=container_payload, auth=("admin", "admin"))
+    if create_c.status_code == 401:
+        pytest.skip("Auth required but credentials not matching")
+    assert create_c.status_code == 201
+    cid = create_c.json()["id"]
+
+    # Dodaj produkt przez API
+    product_payload = {
+        "name": "Product to Delete",
+        "quantity": "10",
+        "totalPrice": "100",
+        "totalPriceCurrency": "USD",
+        "productCbm": "",
+        "customsDutyPercent": "",
+    }
+    create_p = client.post(f"/api/containers/{cid}/products", json=product_payload, auth=("admin", "admin"))
+    if create_p.status_code == 401:
+        pytest.skip("Auth required but credentials not matching")
+    assert create_p.status_code == 201
+    pid = create_p.json()["id"]
+
+    # Sprawdź, że produkt istnieje
+    list_resp = client.get("/api/containers")
+    container = next(c for c in list_resp.json() if c["id"] == cid)
+    assert len(container["products"]) == 1
+
+    # Usuń produkt
+    del_resp = client.delete(f"/api/containers/{cid}/products/{pid}", auth=("admin", "admin"))
+    if del_resp.status_code == 401:
+        pytest.skip("Auth required but credentials not matching")
+    assert del_resp.status_code == 204
+
+    # Sprawdź, że produkt NIE wrócił
+    list_resp2 = client.get("/api/containers")
+    container2 = next(c for c in list_resp2.json() if c["id"] == cid)
+    assert len(container2["products"]) == 0, \
+        "Produkt powinien być usunięty, ale nadal pojawia się w kontenerze"
 
 def test_import_from_drive_mocked(monkeypatch):
     # Mock _drive_build_service and _drive_resolve_root_id

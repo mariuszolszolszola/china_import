@@ -14,6 +14,7 @@ export const _rawState = {
   filterMonth: null,
   isSyncingFromSheet: false,
   isSyncingProducts: false,
+  initialLoadDone: false,
   productFilesCache: {},
 };
 

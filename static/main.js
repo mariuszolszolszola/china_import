@@ -203,12 +203,12 @@ if (refreshProductsBtnEl) {
   refreshProductsBtnEl.addEventListener("click", async () => {
     // Załaduj aktualne kontenery
     await initTheme();
-  loadContainers();
+    await loadContainers();
     // Synchronizacja inkrementalna z arkusza (bez kasowania istniejących pozycji)
     await syncProductsFromSheet(false);
     // Ponownie załaduj kontenery
     await initTheme();
-  loadContainers();
+    await loadContainers();
     // Przerysuj listę produktów (kafelki)
     renderProductsList();
   });
@@ -243,7 +243,7 @@ if (productsListEl) {
       try {
         await api("DELETE", `/api/containers/${cid}/products/${pid}`);
         await initTheme();
-  loadContainers();
+        await loadContainers();
         renderProductsList();
       } catch (e) {
         if (e.message.includes("Container not found") || e.message.includes("Product not found")) {
@@ -287,7 +287,7 @@ els.saveContainerBtn.addEventListener("click", async () => {
       await api("POST", "/api/containers", data);
     }
     await initTheme();
-  loadContainers();
+    await loadContainers();
     state.editingContainerId = null;
     state.showContainerForm = false;
     els.containerFormSection.classList.add("hidden");
@@ -496,7 +496,7 @@ els.saveProductBtn.addEventListener("click", async () => {
       await api("POST", `/api/containers/${containerId}/products`, data);
     }
     await initTheme();
-  loadContainers();
+    await loadContainers();
     state.editingProductId = null;
     state.showProductForm = false;
     els.productFormSection.classList.add("hidden");
@@ -551,19 +551,19 @@ if (els.loadProductFromSheetBtn) {
 els.refreshBtn.addEventListener("click", async () => {
   // Najpierw upewnij się, że stan jest aktualny
   await initTheme();
-  loadContainers();
+  await loadContainers();
 
   // Następnie wymuś pełną synchronizację (replace) kontenerów
   await syncContainersFromSheet(true);
   await initTheme();
-  loadContainers();
+  await loadContainers();
 
   // Teraz wymuś pełną synchronizację (replace) produktów
   await syncProductsFromSheet(true);
 
   // Na końcu odśwież widok i dane
   await initTheme();
-  loadContainers();
+  await loadContainers();
   renderProductsList();
 });
 
@@ -604,7 +604,7 @@ els.containerList.addEventListener("click", async (ev) => {
     try {
       await api("DELETE", `/api/containers/${id}`);
       await initTheme();
-  loadContainers();
+      await loadContainers();
     } catch (e) {
       if (e.message.includes("Container not found")) {
         alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
@@ -634,7 +634,7 @@ els.containerList.addEventListener("click", async (ev) => {
     try {
       await api("DELETE", `/api/containers/${cid}/products/${pid}`);
       await initTheme();
-  loadContainers();
+      await loadContainers();
     } catch (e) {
       if (e.message.includes("Container not found") || e.message.includes("Product not found")) {
         alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
@@ -657,7 +657,7 @@ els.containerList.addEventListener("change", async (ev) => {
   try {
     await api("PUT", `/api/containers/${id}`, { [field]: checked });
     await initTheme();
-  loadContainers();
+    await loadContainers();
   } catch (e) {
     alert("Błąd aktualizacji statusu: " + e.message);
   }
@@ -687,21 +687,27 @@ async function updateVersionBadge() {
 window.addEventListener("DOMContentLoaded", async () => {
   await loadSheets();
   await initTheme();
-  loadContainers();
+  await loadContainers();
   renderProductsList();
 
-  // Gdy pusto na starcie – automatyczny import z arkusza (kontenery)
-  if (!Array.isArray(state.containers) || state.containers.length === 0) {
+  // Gdy pusto na starcie i nie było jeszcze synchronizacji – automatyczny import z arkusza (kontenery)
+  // Flaga initialLoadDone zapobiega re-importowi po celowym usunięciu kontenerów przez użytkownika
+  if (!state.initialLoadDone && (!Array.isArray(state.containers) || state.containers.length === 0)) {
     await syncContainersFromSheet(false);
     await initTheme();
-  loadContainers();
+    await loadContainers();
   }
 
   // Następnie spróbuj zaimportować produkty z arkusza (bez duplikacji)
-  await syncProductsFromSheet(false);
-  await initTheme();
-  loadContainers();
-  renderProductsList();
+  if (!state.initialLoadDone) {
+    await syncProductsFromSheet(false);
+    await initTheme();
+    await loadContainers();
+    renderProductsList();
+  }
+
+  // Oznacz, że synchronizacja początkowa zakończona — nie reimportuj przy kolejnym odświeżeniu
+  state.initialLoadDone = true;
 });
 
 /* Download all attachments (delegacja na cały dokument) */
