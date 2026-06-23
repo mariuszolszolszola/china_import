@@ -66,7 +66,7 @@ def test_create_product_validation():
     # First create a container directly in memory
     with _data_lock:
         _mem_data.append({
-            "id": 1,
+            "id": "1",
             "name": "Container 1",
             "orderDate": "2025-01-01",
             "productionDays": "30",

@@ -470,8 +470,8 @@ els.toggleProductFormBtn.addEventListener("click", () => {
 els.pTotalPriceCurrency.addEventListener("click", () => toggleCurrencyButton(els.pTotalPriceCurrency));
 
 els.saveProductBtn.addEventListener("click", async () => {
-  const containerId = parseInt(els.productContainerSelect.value || "0", 10);
-  if (!containerId) {
+  const containerId = els.productContainerSelect.value;
+  if (!containerId || containerId === "0" || containerId === "") {
     alert("Wybierz kontener!");
     return;
   }
@@ -704,10 +704,10 @@ document.addEventListener("click", async (ev) => {
   if (!(target instanceof HTMLElement)) return;
   const action = target.getAttribute("data-action");
   if (action !== "download-all") return;
-  const cid = parseInt(target.getAttribute("data-cid") || "0", 10);
-  const pid = parseInt(target.getAttribute("data-pid") || "0", 10);
-  const c = state.containers.find((x) => parseInt(x.id, 10) === cid);
-  const p = c?.products?.find((x) => parseInt(x.id, 10) === pid);
+  const cidStr = target.getAttribute("data-cid") || "";
+  const pidStr = target.getAttribute("data-pid") || "";
+  const c = state.containers.find((x) => String(x.id) === cidStr);
+  const p = c?.products?.find((x) => String(x.id) === pidStr);
   let urls = Array.isArray(p?.files) ? p.files : [];
   // Brak lokalnych linków → spróbuj pobrać z Drive wg nazwy produktu
   if (!urls.length && p?.name) {

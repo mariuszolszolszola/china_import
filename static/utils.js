@@ -315,7 +315,7 @@ export async function syncProductsFromSheet(replaceExisting = false) {
     }
 
     const containers = Array.isArray(state.containers) ? state.containers.slice() : [];
-    const byId = new Map(containers.map(c => [parseInt(c.id, 10), c]));
+    const byId = new Map(containers.map(c => [String(c.id), c]));
     const byName = new Map(containers.map(c => [String(c.name || "").trim().toLowerCase(), c]));
     console.log(`[Sync] syncProductsFromSheet: matching against ${containers.length} containers, names: [${Array.from(byName.keys()).join(', ')}]`);
 
@@ -330,11 +330,11 @@ export async function syncProductsFromSheet(replaceExisting = false) {
     }
     const deduped = [];
     for (const [nameKey, arr] of groups.entries()) {
-      const withCid = arr.filter(r => r.containerId != null && Number.isFinite(parseInt(r.containerId, 10)));
+      const withCid = arr.filter(r => r.containerId != null && String(r.containerId).trim() !== "");
       if (withCid.length > 0) {
         const seenCid = new Set();
         for (const r of withCid) {
-          const cidS = String(parseInt(r.containerId, 10));
+          const cidS = String(r.containerId).trim();
           if (!seenCid.has(cidS)) {
             seenCid.add(cidS);
             deduped.push(r);
@@ -355,9 +355,9 @@ export async function syncProductsFromSheet(replaceExisting = false) {
 
     let created = 0, failed = 0, unmatched = 0;
     for (const rec of deduped) {
-      const cid = rec.containerId != null ? parseInt(rec.containerId, 10) : NaN;
+      const cid = rec.containerId != null ? String(rec.containerId).trim() : null;
       const cname = String(rec.containerName || "").trim().toLowerCase();
-      let container = (!Number.isNaN(cid) && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
+      let container = (cid && byId.get(cid)) || (cname ? byName.get(cname) : undefined);
       if (!container) {
         // Fallback: przypisz produkt do pierwszego dostępnego kontenera (aby nie skończyć z pustą listą)
         container = containers[0];

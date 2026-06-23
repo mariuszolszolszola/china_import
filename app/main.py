@@ -76,11 +76,11 @@ def _save_data(data: List[Dict[str, Any]]) -> None:
     with _data_lock:
         _mem_data = [dict(item) for item in data]
 
-def _next_id() -> int:
-    # millisecond timestamp + random suffix to prevent collisions
-    ts = int(datetime.now().timestamp() * 1000)
-    # Przesuń timestamp o 1000 (3 cyfry) i dodaj losową wartość 0-999
-    return (ts * 1000) + secrets.randbelow(1000)
+def _next_id() -> str:
+    import string
+    import secrets
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(6))
 
 def _calc_pickup_date(order_date: Optional[str], production_days: Optional[str]) -> Optional[str]:
     if not order_date or not production_days:
@@ -277,14 +277,14 @@ def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 # Domyślne nagłówki w arkuszach
 HEADERS_CONTAINERS = [
-    "name","orderDate","paymentDate","productionDays","deliveryDate","exchangeRate",
+    "id","name","orderDate","paymentDate","productionDays","deliveryDate","exchangeRate",
     "containerCost","containerCostCurrency","customsClearanceCost","customsClearanceCostCurrency",
     "transportChinaCost","transportChinaCostCurrency","transportPolandCost","transportPolandCostCurrency",
     "insuranceCost","insuranceCostCurrency","totalTransportCbm","additionalCosts","additionalCostsCurrency",
     "pickedUpInChina","customsClearanceDone","deliveredToWarehouse","documentsInSystem"
 ]
 HEADERS_PRODUCTS = [
-    "name","quantity","totalPrice","totalPriceCurrency","productCbm","customsDutyPercent","containerName","containerId"
+    "id","name","quantity","totalPrice","totalPriceCurrency","productCbm","customsDutyPercent","containerName","containerId"
 ]
 
 def _sheet_get_headers(ws):
@@ -504,34 +504,33 @@ def _sheet_delete_rows_by_key(title: str, default_headers: List[str], key: str, 
         logger.error(f"[Sheets] Delete-all rows failed for '{title}': {e}")
         return 0
 
-def _on_deleted_container_sync_to_sheet(container_name: str) -> bool:
+def _on_deleted_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
     """
     Usuń kontener z arkusza Google Sheets po DELETE (write-through).
-    Dopasowanie po kolumnie 'name'. Usuwa też powiązane produkty.
+    Dopasowanie po kolumnie 'id'. Usuwa też powiązane produkty.
     """
     if SHEETS_SYNC_ON_WRITE != "1":
         logger.info("[Sheets] Delete sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
-    # Usuń kontener
-    ok = _sheet_delete_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "name", container_name)
-    logger.info(f"[Sheets] Container delete sync {'OK' if ok else 'FAILED'} (name='{container_name}')")
-    # Usuń powiązane produkty (po containerName)
-    deleted_products = _sheet_delete_rows_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "containerName", container_name)
-    logger.info(f"[Sheets] Deleted {deleted_products} products for container '{container_name}'")
+    # Usuń z arkusza kontener po ID
+    ok = _sheet_delete_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "id", container.get("id"))
+    logger.info(f"[Sheets] Container delete sync {'OK' if ok else 'FAILED'} (id='{container.get('id')}')")
+    # Usuń powiązane produkty (po containerId)
+    deleted_products = _sheet_delete_rows_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "containerId", container.get("id"))
+    logger.info(f"[Sheets] Deleted {deleted_products} products for container '{container.get('id')}'")
     return ok
 
-def _on_deleted_product_sync_to_sheet(container_name: str, product_name: str) -> bool:
+def _on_deleted_product_sync_to_sheet(container_name: str, product: Dict[str, Any]) -> bool:
     """
     Usuń produkt z arkusza Google Sheets po DELETE (write-through).
-    Dopasowanie po kolumnie 'name' w arkuszu produktów.
-    Uwaga: jeśli istnieje wiele produktów o tej samej nazwie w różnych kontenerach,
-    usuwany jest pierwszy pasujący wiersz. W przyszłości dodać compound key (containerName+name).
+    Dopasowanie po kolumnie 'id' w arkuszu produktów.
     """
     if SHEETS_SYNC_ON_WRITE != "1":
         logger.info("[Sheets] Delete sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
-    ok = _sheet_delete_row_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "name", product_name)
-    logger.info(f"[Sheets] Product delete sync {'OK' if ok else 'FAILED'} (name='{product_name}', container='{container_name}')")
+    # Usuń produkt z arkusza po ID
+    ok = _sheet_delete_row_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "id", product.get("id"))
+    logger.info(f"[Sheets] Product delete sync {'OK' if ok else 'FAILED'} (id='{product.get('id')}', container='{container_name}')")
     return ok
 
 def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
@@ -543,9 +542,7 @@ def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
         logger.info("[Sheets] Update sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**container}
-    rec.pop("id", None)
-    rec.pop("products", None)
-    ok = _sheet_update_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "name", container.get("name", ""), rec)
+    ok = _sheet_update_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "id", container.get("id", ""), rec)
     logger.info(f"[Sheets] Container update sync {'OK' if ok else 'FAILED'}")
     return ok
 
@@ -554,7 +551,6 @@ def _on_added_product_sync_to_sheet(container: Dict[str, Any], product: Dict[str
         logger.info("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**product}
-    rec.pop("id", None)
     rec["containerName"] = container.get("name", "")
     rec["containerId"] = container.get("id")
     ok = _sheet_append_row_dynamic(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, rec)
@@ -682,7 +678,7 @@ class ProductIn(BaseModel):
 
 
 class Product(ProductIn):
-    id: int = Field(default_factory=_next_id)
+    id: str = Field(default_factory=_next_id)
 
 class ContainerIn(BaseModel):
     name: str
@@ -728,7 +724,7 @@ class ContainerIn(BaseModel):
 
 
 class Container(ContainerIn):
-    id: int = Field(default_factory=_next_id)
+    id: str = Field(default_factory=_next_id)
     pickupDate: Optional[str] = None
     products: List[Product] = Field(default_factory=list)
 
@@ -1030,8 +1026,8 @@ def api_version() -> Dict[str, Any]:
 # Upload plików produktów → Google Drive
 
 @app.get("/api/containers/{container_id}/report.pdf")
-def get_container_report_pdf(container_id: int):
-    c = next((x for x in _mem_data if x["id"] == container_id), None)
+def get_container_report_pdf(container_id: str):
+    c = next((x for x in _mem_data if str(x.get("id")) == container_id), None)
     if not c:
         raise HTTPException(status_code=404, detail="Container not found")
     
@@ -1283,10 +1279,10 @@ def create_container(payload: ContainerIn, request: Request, background_tasks: B
     return c.model_dump()
 
 @app.put("/api/containers/{container_id}")
-def update_container(container_id: int, payload: ContainerUpdate, background_tasks: BackgroundTasks) -> Container:
+def update_container(container_id: str, payload: ContainerUpdate, background_tasks: BackgroundTasks) -> Container:
     data = _load_data()
     for i, item in enumerate(data):
-        if int(item.get("id")) == container_id:
+        if str(item.get("id")) == container_id:
             # zachowaj products
             products = item.get("products", [])
             # zaktualizuj pola
@@ -1387,12 +1383,12 @@ def sheets_append_test(target: str = "containers") -> Dict[str, Any]:
         return {"ok": ok, "target": "containers"}
 
 @app.delete("/api/containers/{container_id}", status_code=204)
-def delete_container(container_id: int, background_tasks: BackgroundTasks):
+def delete_container(container_id: str, background_tasks: BackgroundTasks):
     data = _load_data()
     deleted_container = None
     new_data = []
     for c in data:
-        if int(c.get("id")) == container_id:
+        if str(c.get("id")) == container_id:
             deleted_container = c
         else:
             new_data.append(c)
@@ -1401,15 +1397,14 @@ def delete_container(container_id: int, background_tasks: BackgroundTasks):
     _save_data(new_data)
     # Usuń wiersz kontenera (i powiązanych produktów) z Google Sheets
     try:
-        container_name = deleted_container.get("name", "")
-        if container_name:
-            background_tasks.add_task(_on_deleted_container_sync_to_sheet, container_name)
+        if deleted_container:
+            background_tasks.add_task(_on_deleted_container_sync_to_sheet, deleted_container)
     except Exception:
         pass
     return
 
 @app.post("/api/containers/{container_id}/products", status_code=201)
-def add_product(container_id: int, payload: ProductIn, request: Request, background_tasks: BackgroundTasks) -> Product:
+def add_product(container_id: str, payload: ProductIn, request: Request, background_tasks: BackgroundTasks) -> Product:
     """
     Dodawanie produktu:
     - Normalnie (bez parametru source=sheet): zawsze tworzy nowy wpis i appenduje do arkusza.
@@ -1418,7 +1413,7 @@ def add_product(container_id: int, payload: ProductIn, request: Request, backgro
     """
     data = _load_data()
     for i, item in enumerate(data):
-        if int(item.get("id")) == container_id:
+        if str(item.get("id")) == container_id:
             products = item.get("products", [])
 
             # Źródło żądania (np. import z arkusza)
@@ -1433,7 +1428,7 @@ def add_product(container_id: int, payload: ProductIn, request: Request, backgro
                 existing_idx = next((j for j, p in enumerate(products) if str(p.get("name", "")).strip().lower() == name_ci), -1)
                 if existing_idx >= 0:
                     # Aktualizuj istniejący produkt, zachowując jego id
-                    existing_id = int(products[existing_idx].get("id"))
+                    existing_id = str(products[existing_idx].get("id"))
                     new_prod = {"id": existing_id, **payload.model_dump()}
                     products[existing_idx] = new_prod
                     item["products"] = products
@@ -1459,13 +1454,13 @@ def add_product(container_id: int, payload: ProductIn, request: Request, backgro
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.put("/api/containers/{container_id}/products/{product_id}")
-def update_product(container_id: int, product_id: int, payload: ProductIn, background_tasks: BackgroundTasks) -> Product:
+def update_product(container_id: str, product_id: str, payload: ProductIn, background_tasks: BackgroundTasks) -> Product:
     data = _load_data()
     for i, item in enumerate(data):
-        if int(item.get("id")) == container_id:
+        if str(item.get("id")) == container_id:
             products = item.get("products", [])
             for j, prod in enumerate(products):
-                if int(prod.get("id")) == product_id:
+                if str(prod.get("id")) == product_id:
                     # zachowujemy id, resztę nadpisujemy
                     new_prod = {"id": product_id, **payload.model_dump()}
                     products[j] = new_prod
@@ -1482,15 +1477,15 @@ def update_product(container_id: int, product_id: int, payload: ProductIn, backg
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.delete("/api/containers/{container_id}/products/{product_id}", status_code=204)
-def delete_product(container_id: int, product_id: int, background_tasks: BackgroundTasks):
+def delete_product(container_id: str, product_id: str, background_tasks: BackgroundTasks):
     data = _load_data()
     for i, item in enumerate(data):
-        if int(item.get("id")) == container_id:
+        if str(item.get("id")) == container_id:
             products = item.get("products", [])
             deleted_product = None
             new_products = []
             for p in products:
-                if int(p.get("id")) == product_id:
+                if str(p.get("id")) == product_id:
                     deleted_product = p
                 else:
                     new_products.append(p)
@@ -1501,10 +1496,9 @@ def delete_product(container_id: int, product_id: int, background_tasks: Backgro
             _save_data(data)
             # Usuń wiersz produktu z Google Sheets
             try:
-                container_name = item.get("name", "")
-                product_name = deleted_product.get("name", "")
-                if product_name:
-                    background_tasks.add_task(_on_deleted_product_sync_to_sheet, container_name, product_name)
+                if deleted_product:
+                    container_name = item.get("name", "")
+                    background_tasks.add_task(_on_deleted_product_sync_to_sheet, container_name, deleted_product)
             except Exception:
                 pass
             return
