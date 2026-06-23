@@ -302,6 +302,15 @@ def _sheet_ensure_headers(ws, default_headers):
             header = _sheet_get_headers(ws)
         except Exception:
             pass
+    else:
+        missing = [h for h in default_headers if h.lower() not in [x.lower() for x in header]]
+        if missing:
+            try:
+                new_header = header + missing
+                ws.update('A1', [new_header])
+                header = new_header
+            except Exception:
+                pass
     return header if header else default_headers
 
 def _sheet_append_row_dynamic(title: str, default_headers: List[str], record: Dict[str, Any]) -> bool:
@@ -348,7 +357,6 @@ def _on_created_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
         logger.info("[Sheets] Sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
         return False
     rec = {**container}
-    rec.pop("id", None)
     rec.pop("products", None)
     ok = _sheet_append_row_dynamic(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, rec)
     logger.info(f"[Sheets] Container sync {'OK' if ok else 'FAILED'}")
@@ -385,7 +393,8 @@ def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, v
         headers = _sheet_ensure_headers(ws, default_headers)
 
         try:
-            key_index = headers.index(key) + 1  # 1-based indeks kolumny
+            lower_headers = [h.lower() for h in headers]
+            key_index = lower_headers.index(key.lower()) + 1  # 1-based indeks kolumny
         except ValueError:
             logger.error(f"[Sheets] Key '{key}' not found in headers -> update aborted")
             return False
@@ -431,7 +440,8 @@ def _sheet_delete_row_by_key(title: str, default_headers: List[str], key: str, v
         headers = _sheet_ensure_headers(ws, default_headers)
 
         try:
-            key_index = headers.index(key) + 1  # 1-based
+            lower_headers = [h.lower() for h in headers]
+            key_index = lower_headers.index(key.lower()) + 1  # 1-based
         except ValueError:
             logger.error(f"[Sheets] Key '{key}' not found in headers -> delete aborted")
             return False
@@ -473,7 +483,8 @@ def _sheet_delete_rows_by_key(title: str, default_headers: List[str], key: str, 
         headers = _sheet_ensure_headers(ws, default_headers)
 
         try:
-            key_index = headers.index(key) + 1
+            lower_headers = [h.lower() for h in headers]
+            key_index = lower_headers.index(key.lower()) + 1
         except ValueError:
             logger.error(f"[Sheets] Key '{key}' not found in headers -> delete-all aborted")
             return 0
@@ -634,7 +645,6 @@ def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[s
         return False
 
     rec = {**product}
-    rec.pop("id", None)
     rec["containerName"] = container.get("name", "")
     rec["containerId"] = container.get("id")
 
