@@ -412,6 +412,128 @@ def _sheet_update_row_by_key(title: str, default_headers: List[str], key: str, v
         logger.error(f"[Sheets] Update failed for '{title}': {e}")
         return False
 
+def _sheet_delete_row_by_key(title: str, default_headers: List[str], key: str, value: Any) -> bool:
+    """
+    Usuń wiersz z arkusza 'title', dopasowując po wartości kolumny 'key'.
+    Fizycznie usuwa wiersz (nie czyści komórek), aby nie zostawił pustego wpisu.
+    """
+    _load_env_from_file()
+    client = _get_gspread_client()
+    file_id = os.environ.get("FILE_ID")
+
+    if not client or not file_id:
+        logger.error(f"[Sheets] Skip delete for '{title}' due to missing config")
+        return False
+
+    try:
+        sh = client.open_by_key(file_id)
+        ws = sh.worksheet(title)
+        headers = _sheet_ensure_headers(ws, default_headers)
+
+        try:
+            key_index = headers.index(key) + 1  # 1-based
+        except ValueError:
+            logger.error(f"[Sheets] Key '{key}' not found in headers -> delete aborted")
+            return False
+
+        col_vals = ws.col_values(key_index)
+        target_row = None
+        for idx, cell in enumerate(col_vals[1:], start=2):  # pomiń nagłówek
+            if str(cell).strip() == str(value).strip():
+                target_row = idx
+                break
+
+        if not target_row:
+            logger.error(f"[Sheets] Row with {key}='{value}' not found -> delete aborted")
+            return False
+
+        ws.delete_rows(target_row)
+        logger.info(f"[Sheets] Deleted row {target_row} from '{title}' (matched {key}='{value}')")
+        return True
+    except Exception as e:
+        logger.error(f"[Sheets] Delete row failed for '{title}': {e}")
+        return False
+
+def _sheet_delete_rows_by_key(title: str, default_headers: List[str], key: str, value: Any) -> int:
+    """
+    Usuń WSZYSTKIE wiersze z arkusza 'title' pasujące do wartości kolumny 'key'.
+    Zwraca liczbę usuniętych wierszy. Usuwa od dołu, aby nie przesuwać indeksów.
+    """
+    _load_env_from_file()
+    client = _get_gspread_client()
+    file_id = os.environ.get("FILE_ID")
+
+    if not client or not file_id:
+        logger.error(f"[Sheets] Skip delete-all for '{title}' due to missing config")
+        return 0
+
+    try:
+        sh = client.open_by_key(file_id)
+        ws = sh.worksheet(title)
+        headers = _sheet_ensure_headers(ws, default_headers)
+
+        try:
+            key_index = headers.index(key) + 1
+        except ValueError:
+            logger.error(f"[Sheets] Key '{key}' not found in headers -> delete-all aborted")
+            return 0
+
+        col_vals = ws.col_values(key_index)
+        # Zbierz numery wierszy do usunięcia (od dołu)
+        rows_to_delete = []
+        for idx, cell in enumerate(col_vals[1:], start=2):
+            if str(cell).strip() == str(value).strip():
+                rows_to_delete.append(idx)
+
+        if not rows_to_delete:
+            logger.info(f"[Sheets] No rows with {key}='{value}' found in '{title}'")
+            return 0
+
+        # Usuń od dołu, aby nie przesuwać indeksów
+        deleted = 0
+        for row in reversed(rows_to_delete):
+            try:
+                ws.delete_rows(row)
+                deleted += 1
+            except Exception as e:
+                logger.error(f"[Sheets] Failed to delete row {row} from '{title}': {e}")
+
+        logger.info(f"[Sheets] Deleted {deleted}/{len(rows_to_delete)} rows from '{title}' (matched {key}='{value}')")
+        return deleted
+    except Exception as e:
+        logger.error(f"[Sheets] Delete-all rows failed for '{title}': {e}")
+        return 0
+
+def _on_deleted_container_sync_to_sheet(container_name: str) -> bool:
+    """
+    Usuń kontener z arkusza Google Sheets po DELETE (write-through).
+    Dopasowanie po kolumnie 'name'. Usuwa też powiązane produkty.
+    """
+    if SHEETS_SYNC_ON_WRITE != "1":
+        logger.info("[Sheets] Delete sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        return False
+    # Usuń kontener
+    ok = _sheet_delete_row_by_key(SHEET_CONTAINERS_TITLE, HEADERS_CONTAINERS, "name", container_name)
+    logger.info(f"[Sheets] Container delete sync {'OK' if ok else 'FAILED'} (name='{container_name}')")
+    # Usuń powiązane produkty (po containerName)
+    deleted_products = _sheet_delete_rows_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "containerName", container_name)
+    logger.info(f"[Sheets] Deleted {deleted_products} products for container '{container_name}'")
+    return ok
+
+def _on_deleted_product_sync_to_sheet(container_name: str, product_name: str) -> bool:
+    """
+    Usuń produkt z arkusza Google Sheets po DELETE (write-through).
+    Dopasowanie po kolumnie 'name' w arkuszu produktów.
+    Uwaga: jeśli istnieje wiele produktów o tej samej nazwie w różnych kontenerach,
+    usuwany jest pierwszy pasujący wiersz. W przyszłości dodać compound key (containerName+name).
+    """
+    if SHEETS_SYNC_ON_WRITE != "1":
+        logger.info("[Sheets] Delete sync disabled (SHEETS_SYNC_ON_WRITE!=1)")
+        return False
+    ok = _sheet_delete_row_by_key(SHEET_PRODUCTS_TITLE, HEADERS_PRODUCTS, "name", product_name)
+    logger.info(f"[Sheets] Product delete sync {'OK' if ok else 'FAILED'} (name='{product_name}', container='{container_name}')")
+    return ok
+
 def _on_updated_container_sync_to_sheet(container: Dict[str, Any]) -> bool:
     """
     Zapisz zmiany kontenera do arkusza (write-through na PUT).
@@ -1265,12 +1387,25 @@ def sheets_append_test(target: str = "containers") -> Dict[str, Any]:
         return {"ok": ok, "target": "containers"}
 
 @app.delete("/api/containers/{container_id}", status_code=204)
-def delete_container(container_id: int):
+def delete_container(container_id: int, background_tasks: BackgroundTasks):
     data = _load_data()
-    new_data = [c for c in data if int(c.get("id")) != container_id]
-    if len(new_data) == len(data):
+    deleted_container = None
+    new_data = []
+    for c in data:
+        if int(c.get("id")) == container_id:
+            deleted_container = c
+        else:
+            new_data.append(c)
+    if deleted_container is None:
         raise HTTPException(status_code=404, detail="Container not found")
     _save_data(new_data)
+    # Usuń wiersz kontenera (i powiązanych produktów) z Google Sheets
+    try:
+        container_name = deleted_container.get("name", "")
+        if container_name:
+            background_tasks.add_task(_on_deleted_container_sync_to_sheet, container_name)
+    except Exception:
+        pass
     return
 
 @app.post("/api/containers/{container_id}/products", status_code=201)
@@ -1347,17 +1482,31 @@ def update_product(container_id: int, product_id: int, payload: ProductIn, backg
     raise HTTPException(status_code=404, detail="Container not found")
 
 @app.delete("/api/containers/{container_id}/products/{product_id}", status_code=204)
-def delete_product(container_id: int, product_id: int):
+def delete_product(container_id: int, product_id: int, background_tasks: BackgroundTasks):
     data = _load_data()
     for i, item in enumerate(data):
         if int(item.get("id")) == container_id:
             products = item.get("products", [])
-            new_products = [p for p in products if int(p.get("id")) != product_id]
-            if len(new_products) == len(products):
+            deleted_product = None
+            new_products = []
+            for p in products:
+                if int(p.get("id")) == product_id:
+                    deleted_product = p
+                else:
+                    new_products.append(p)
+            if deleted_product is None:
                 raise HTTPException(status_code=404, detail="Product not found")
             item["products"] = new_products
             data[i] = item
             _save_data(data)
+            # Usuń wiersz produktu z Google Sheets
+            try:
+                container_name = item.get("name", "")
+                product_name = deleted_product.get("name", "")
+                if product_name:
+                    background_tasks.add_task(_on_deleted_product_sync_to_sheet, container_name, product_name)
+            except Exception:
+                pass
             return
     raise HTTPException(status_code=404, detail="Container not found")
 
