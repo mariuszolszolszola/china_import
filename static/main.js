@@ -1,7 +1,7 @@
 
 import { state } from './state.js';
 import { els } from './dom.js';
-import { 
+import {
   showToast, showLoader, hideLoader, initTheme, num, toUSD, convertPrice, normalizeDateValue, fillSheetContainerSelect, fillSheetProductSelect,
   fileNameFromUrl, extractDriveFileId, needsNameFromDrive, fetchDriveFilesByProductName, renderAttachmentLinksInto,
   loadSheets, syncContainersFromSheet, syncProductsFromSheet, getSheetContainers, getSheetProducts
@@ -21,7 +21,7 @@ function readContainerForm() {
   try {
     console.debug("[Form] Container raw", { rawOrder, rawPayment, rawDelivery });
     console.debug("[Form] Container normalized", { orderDate, paymentDate, deliveryDate });
-  } catch (_){}
+  } catch (_) { }
 
   const data = {
     name: els.cName.value.trim(),
@@ -56,7 +56,7 @@ function readContainerForm() {
     documentsInSystem: !!els.cDocumentsInSystem.checked,
   };
 
-  try { console.debug("[Form] Container data", data); } catch (_){}
+  try { console.debug("[Form] Container data", data); } catch (_) { }
 
   return data;
 }
@@ -158,6 +158,7 @@ function resetProductForm() {
   if (els.pFiles) els.pFiles.value = "";
   if (els.pFilesPreview) els.pFilesPreview.innerHTML = "";
 }
+
 
 /* Zdarzenia globalne */
 if (els.currencySelect) {
@@ -270,20 +271,20 @@ els.toggleContainerFormBtn.addEventListener("click", () => {
 });
 
 els.saveContainerBtn.addEventListener("click", async () => {
-  try { console.log("[UI] SaveContainer: click", { editingContainerId: state.editingContainerId }); } catch (_){}
+  try { console.log("[UI] SaveContainer: click", { editingContainerId: state.editingContainerId }); } catch (_) { }
   const data = readContainerForm();
-  try { console.log("[UI] SaveContainer: payload", data); } catch (_){}
+  try { console.log("[UI] SaveContainer: payload", data); } catch (_) { }
   if (!data.name || !data.orderDate || !data.productionDays || !data.exchangeRate) {
-    try { console.warn("[UI] SaveContainer: validation failed", { name: !!data.name, orderDate: data.orderDate, productionDays: data.productionDays, exchangeRate: data.exchangeRate }); } catch (_){}
+    try { console.warn("[UI] SaveContainer: validation failed", { name: !!data.name, orderDate: data.orderDate, productionDays: data.productionDays, exchangeRate: data.exchangeRate }); } catch (_) { }
     alert("Wypełnij wszystkie wymagane pola kontenera!");
     return;
   }
   try {
     if (state.editingContainerId) {
-      try { console.log("[UI] SaveContainer: PUT", { id: state.editingContainerId }); } catch (_){}
+      try { console.log("[UI] SaveContainer: PUT", { id: state.editingContainerId }); } catch (_) { }
       await api("PUT", `/api/containers/${state.editingContainerId}`, data);
     } else {
-      try { console.log("[UI] SaveContainer: POST", {}); } catch (_){}
+      try { console.log("[UI] SaveContainer: POST", {}); } catch (_) { }
       await api("POST", "/api/containers", data);
     }
     await initTheme();
@@ -292,9 +293,9 @@ els.saveContainerBtn.addEventListener("click", async () => {
     state.showContainerForm = false;
     els.containerFormSection.classList.add("hidden");
     resetContainerForm();
-    try { console.log("[UI] SaveContainer: done"); } catch (_){}
+    try { console.log("[UI] SaveContainer: done"); } catch (_) { }
   } catch (e) {
-    try { console.error("[UI] SaveContainer: error", e); } catch (_){}
+    try { console.error("[UI] SaveContainer: error", e); } catch (_) { }
     if (e.message.includes("Container not found")) {
       alert("Wykryto nieaktualne dane. Strona zostanie odświeżona.");
       window.location.reload();
@@ -355,7 +356,7 @@ async function uploadProductFiles(productName, files) {
         if (state && state.auth && state.auth.username != null && state.auth.password != null) {
           opts.headers["Authorization"] = "Basic " + btoa(unescape(encodeURIComponent(String(state.auth.username) + ":" + String(state.auth.password))));
         }
-      } catch (_) {}
+      } catch (_) { }
 
       let res = await fetch("/api/files/upload", opts);
 
@@ -367,7 +368,7 @@ async function uploadProductFiles(productName, files) {
           state.auth = { username: u, password: p }; // przechowywane wyłącznie w pamięci
           try {
             opts.headers["Authorization"] = "Basic " + btoa(unescape(encodeURIComponent(String(u) + ":" + String(p))));
-          } catch (_) {}
+          } catch (_) { }
           res = await fetch("/api/files/upload", opts);
         }
       }
@@ -575,7 +576,7 @@ els.containerList.addEventListener("click", async (ev) => {
   const action = target.getAttribute("data-action");
   if (!action) return;
 
-  
+
   if (action === "download-pdf") {
     const cid = target.getAttribute("data-id");
     if (!cid) return;
@@ -736,13 +737,13 @@ function renderImportTree(containers) {
     treeEl.innerHTML = '<div class="empty">Brak folderów w wybranym katalogu Google Drive.</div>';
     return;
   }
-  
+
   let html = '<ul style="margin: 0; padding: 0; list-style: none;">';
-  
+
   containers.forEach(c => {
     const products = Array.isArray(c.products) ? c.products : [];
     const hasProducts = products.length > 0;
-    
+
     html += `
       <li class="tree-node" data-type="container" data-id="${c.id}">
         <div class="tree-node-content">
@@ -752,7 +753,7 @@ function renderImportTree(containers) {
           <span class="tree-node-meta" style="margin-left: auto; font-size: 0.8rem; color: var(--text-muted);">${products.length} prod.</span>
         </div>
     `;
-    
+
     if (hasProducts) {
       html += `<ul class="tree-children" style="margin-left: 24px; padding-left: 12px; border-left: 1px dashed var(--border);">`;
       products.forEach(p => {
@@ -770,30 +771,30 @@ function renderImportTree(containers) {
       });
       html += `</ul>`;
     }
-    
+
     html += `</li>`;
   });
-  
+
   html += '</ul>';
   treeEl.innerHTML = html;
-  
+
   // Obsługa kliknięcia całego elementu do zaznaczania
   treeEl.querySelectorAll('.container-checkbox').forEach(cb => {
     cb.addEventListener('change', (e) => {
       const containerId = e.target.getAttribute('data-id');
       const isChecked = e.target.checked;
-      
+
       treeEl.querySelectorAll(`.product-checkbox[data-parent-id="${containerId}"]`).forEach(pcb => {
         pcb.checked = isChecked;
       });
     });
   });
-  
+
   treeEl.querySelectorAll('.product-checkbox').forEach(pcb => {
     pcb.addEventListener('change', (e) => {
       const parentId = e.target.getAttribute('data-parent-id');
       const parentCb = treeEl.querySelector(`.container-checkbox[data-id="${parentId}"]`);
-      
+
       if (!e.target.checked) {
         if (parentCb) parentCb.checked = false;
       } else {
@@ -838,14 +839,14 @@ if (els.importRunBtn) {
   els.importRunBtn.addEventListener("click", async () => {
     const treeEl = els.importTree;
     if (!treeEl) return;
-    
+
     const containerIds = [];
     const productIds = [];
-    
+
     treeEl.querySelectorAll('.container-checkbox:checked').forEach(cb => {
       containerIds.push(cb.getAttribute('data-id'));
     });
-    
+
     treeEl.querySelectorAll('.product-checkbox:checked').forEach(pcb => {
       const parentId = pcb.getAttribute('data-parent-id');
       const parentChecked = containerIds.includes(parentId);
@@ -853,12 +854,12 @@ if (els.importRunBtn) {
         productIds.push(pcb.getAttribute('data-id'));
       }
     });
-    
+
     if (containerIds.length === 0 && productIds.length === 0) {
       alert("Zaznacz przynajmniej jeden folder kontenera lub produktu do zaimportowania!");
       return;
     }
-    
+
     showLoader();
     try {
       const body = {
@@ -866,14 +867,14 @@ if (els.importRunBtn) {
         productIds,
         rootId: currentImportRootId
       };
-      
+
       const res = await api("POST", "/api/containers/import/drive", body);
       showToast(`Pomyślnie zaimportowano z Drive! (Kontenery: ${res?.imported?.containers ?? 0}, Produkty: ${res?.imported?.products ?? 0})`, "success");
-      
+
       if (els.importModal) {
         els.importModal.classList.add("hidden");
       }
-      
+
       await initTheme();
       await loadContainers();
     } catch (e) {
