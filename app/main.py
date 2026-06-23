@@ -209,7 +209,7 @@ def _truthy(v) -> bool:
     return s in ("1", "true", "yes", "y", "t", "x", "✓")
 
 def _map_sheet_container(rec: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    res = {
         "name": str(rec.get("name", "")).strip(),
         "orderDate": str(rec.get("orderDate", "")).strip(),
         "paymentDate": (str(rec.get("paymentDate", "")).strip() or None),
@@ -234,6 +234,9 @@ def _map_sheet_container(rec: Dict[str, Any]) -> Dict[str, Any]:
         "deliveredToWarehouse": _truthy(rec.get("deliveredToWarehouse", False)),
         "documentsInSystem": _truthy(rec.get("documentsInSystem", False)),
     }
+    if str(rec.get("id", "")).strip():
+        res["id"] = str(rec.get("id")).strip()
+    return res
 
 def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -250,7 +253,7 @@ def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
                 cid_raw = v
                 break
     try:
-        cid = int(str(cid_raw).strip()) if cid_raw not in (None, "") else None
+        cid = str(cid_raw).strip() if cid_raw not in (None, "") else None
     except Exception:
         cid = None
 
@@ -264,7 +267,7 @@ def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
                 break
     cname = str(cname_raw or "").strip()
 
-    return {
+    res = {
         "name": str(rec.get("name", "")).strip(),
         "quantity": str(rec.get("quantity", "")).strip(),
         "totalPrice": str(rec.get("totalPrice", "")).strip(),
@@ -274,6 +277,9 @@ def _map_sheet_product(rec: Dict[str, Any]) -> Dict[str, Any]:
         "containerId": cid,
         "containerName": cname,
     }
+    if str(rec.get("id", "")).strip():
+        res["id"] = str(rec.get("id")).strip()
+    return res
 
 # Domyślne nagłówki w arkuszach
 HEADERS_CONTAINERS = [
