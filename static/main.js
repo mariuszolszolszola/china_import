@@ -690,24 +690,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   await loadContainers();
   renderProductsList();
 
-  // Gdy pusto na starcie i nie było jeszcze synchronizacji – automatyczny import z arkusza (kontenery)
-  // Flaga initialLoadDone zapobiega re-importowi po celowym usunięciu kontenerów przez użytkownika
-  if (!state.initialLoadDone && (!Array.isArray(state.containers) || state.containers.length === 0)) {
-    await syncContainersFromSheet(false);
-    await initTheme();
-    await loadContainers();
-  }
-
-  // Następnie spróbuj zaimportować produkty z arkusza (bez duplikacji)
-  if (!state.initialLoadDone) {
-    await syncProductsFromSheet(false);
-    await initTheme();
-    await loadContainers();
-    renderProductsList();
-  }
-
-  // Oznacz, że synchronizacja początkowa zakończona — nie reimportuj przy kolejnym odświeżeniu
-  state.initialLoadDone = true;
+  // Automatyczny import z arkusza jest obsługiwany przez backend (_auto_import_from_sheets_on_start).
+  // Frontend NIE reimportuje z arkusza przy każdym odświeżeniu strony,
+  // żeby nie przywracać celowo usuniętych kontenerów/produktów.
+  // Pełna resynchronizacja z arkusza jest dostępna przez przycisk "Odśwież" (refreshBtn).
 });
 
 /* Download all attachments (delegacja na cały dokument) */
