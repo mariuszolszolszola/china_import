@@ -223,6 +223,7 @@ export async function syncContainersFromSheet(replaceExisting = false) {
     let created = 0, failed = 0;
     for (const rec of sheetRows) {
       const data = {
+        id: rec.id || undefined,
         name: rec.name || "",
         orderDate: rec.orderDate || "",
         paymentDate: rec.paymentDate || null,
@@ -370,6 +371,7 @@ export async function syncProductsFromSheet(replaceExisting = false) {
       }
  
       const data = {
+        id: rec.id || undefined,
         name: rec.name || "",
         quantity: rec.quantity || "",
         totalPrice: rec.totalPrice || "",

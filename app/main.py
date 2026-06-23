@@ -674,6 +674,7 @@ def _on_updated_product_sync_to_sheet(container: Dict[str, Any], product: Dict[s
     return False
 
 class ProductIn(BaseModel):
+    id: Optional[str] = None
     name: str
     quantity: str
     totalPrice: str
@@ -697,6 +698,7 @@ class Product(ProductIn):
     id: str = Field(default_factory=_next_id)
 
 class ContainerIn(BaseModel):
+    id: Optional[str] = None
     name: str
     orderDate: str
     productionDays: str
@@ -1279,7 +1281,10 @@ def list_containers() -> List[Container]:
 
 @app.post("/api/containers", status_code=201)
 def create_container(payload: ContainerIn, request: Request, background_tasks: BackgroundTasks) -> Container:
-    c = Container(**payload.model_dump())
+    payload_dict = payload.model_dump(exclude_unset=True)
+    if "id" in payload_dict and not payload_dict["id"]:
+        del payload_dict["id"]
+    c = Container(**payload_dict)
     c.pickupDate = _calc_pickup_date(c.orderDate, c.productionDays)
     data = _load_data()
     data.append(c.model_dump())
@@ -1454,7 +1459,10 @@ def add_product(container_id: str, payload: ProductIn, request: Request, backgro
                     return new_prod
 
             # Domyślnie: utwórz nowy produkt
-            p = Product(**payload.model_dump())
+            payload_dict = payload.model_dump(exclude_unset=True)
+            if "id" in payload_dict and not payload_dict["id"]:
+                del payload_dict["id"]
+            p = Product(**payload_dict)
             products.append(p.model_dump())
             item["products"] = products
             data[i] = item
